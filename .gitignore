@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Runtime/temp
+tmp_uploads/
+*.log
+
+# Local env/config
+.env
+.env.*
+
+# Generated captions / datasets
+*.txt
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Archives
+*.zip

@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>LM Studio Video/Image Captioner</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="layout">
+    <main class="chat">
+      <h2>Multiturn chat outputs, separated between user and LLM</h2>
+
+      <div id="chatLog" class="chatlog"></div>
+
+      <div class="composer">
+        <label class="filedrop">
+          <input type="file" id="clipInput" accept="video/*">
+          <span>message/drop in image or clip attachment</span>
+        </label>
+        <button id="sendBtn">Send & Caption</button>
+      </div>
+    </main>
+
+    <aside class="side">
+      <section class="card">
+        <h3>system prompt</h3>
+        <textarea id="systemPrompt" rows="6">You caption short videos for dataset creation. Only return the caption (no prelude, no quotes). Be concrete, specific, and neutral. If multiple actions occur, summarize succinctly.</textarea>
+      </section>
+
+      <section class="card">
+        <h3>settings</h3>
+
+        <div class="row">
+          <label>Model:</label>
+          <input id="modelName" placeholder="qwen2.5-vl-32b-instruct">
+        </div>
+
+        <div class="row">
+          <label>Number of frames:</label>
+          <input id="numFrames" type="number" min="1" max="32" value="5">
+        </div>
+
+        <div class="row">
+          <label>Frame Sampling Type:</label>
+          <select id="samplingType">
+            <option value="uniform" selected>uniform</option>
+            <option value="head">head (first N)</option>
+          </select>
+        </div>
+
+        <div class="row">
+          <label>Parallel batch workers:</label>
+          <input id="maxConcurrent" type="number" min="1" max="16" value="4">
+          <small style="color:#8a90a6">Match LM Studio's Parallel value, or lower it if VRAM/latency gets ugly. 4-8 is usually the sane testing range.</small>
+        </div>
+
+        <div class="row">
+          <label>Abort after LM Studio/API errors:</label>
+          <input id="abortAfterServerErrors" type="number" min="0" max="999" value="3">
+          <small style="color:#8a90a6">Stops a bad concurrency setting before it burns through the whole folder. Use 0 to disable.</small>
+        </div>
+
+        <div class="row">
+          <label><input type="checkbox" id="imageMode"> Image mode (caption still images)</label>
+          <small style="color:#8a90a6">When enabled: chat accepts an image; batch scans only image files in the target folder.</small>
+        </div>
+
+        <div class="row">
+          <label><input type="checkbox" id="useExistingCaption"> Use existing caption</label>
+          <small style="color:#8a90a6">Batch: reads <code>basename.txt</code> if present. Chat: paste below.</small>
+        </div>
+
+        <div class="row">
+          <label>Existing caption (chat mode):</label>
+          <textarea id="existingCaption" rows="4" placeholder="Paste a booru tag string or previous caption here (optional)"></textarea>
+        </div>
+
+        <div class="row">
+          <label>Assistant response prefill:</label>
+          <input id="prefill" placeholder="(optional prefix, continues from here)">
+        </div>
+      </section>
+
+      <section class="card">
+        <h3>Batch Process Args</h3>
+        <div class="row">
+          <label>Target folder:</label>
+          <input id="targetFolder" placeholder="/path/to/clips_or_images">
+        </div>
+        <div class="row">
+          <label><input type="checkbox" id="overwrite"> Overwrite existing captions?</label>
+        </div>
+        <div class="row">
+          <label><input type="checkbox" id="prependExisting"> Prepend to existing captions file?</label>
+        </div>
+        <div class="row">
+          <label><input type="checkbox" id="notifyDone" checked> Notify when done</label>
+        </div>
+        <button id="startBatch">Start Batch Process</button>
+
+        <div class="row batch-progress-row" style="margin-top:10px;">
+          <div id="batchStatus">Idle</div>
+          <div id="batchStats" class="batch-stats"></div>
+          <div id="activeFiles" class="active-files" style="display:none;"></div>
+          <progress id="batchProgress" value="0" max="100" style="width:100%;"></progress>
+        </div>
+        <div class="row">
+          <button id="cancelBatch" disabled>Cancel Batch</button>
+        </div>
+
+        <pre id="batchLog" class="log"></pre>
+      </section>
+    </aside>
+  </div>
+
+  <script src="/static/script.js"></script>
+</body>
+</html>
