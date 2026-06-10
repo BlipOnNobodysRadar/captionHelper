@@ -20,6 +20,8 @@ MAX_BATCH_CONCURRENCY = int(os.environ.get("LMSTUDIO_MAX_BATCH_CONCURRENCY", "16
 LMSTUDIO_REQUEST_RETRIES = int(os.environ.get("LMSTUDIO_REQUEST_RETRIES", "2"))
 LMSTUDIO_RETRY_BACKOFF_SEC = float(os.environ.get("LMSTUDIO_RETRY_BACKOFF_SEC", "2"))
 LMSTUDIO_ABORT_AFTER_SERVER_ERRORS = int(os.environ.get("LMSTUDIO_ABORT_AFTER_SERVER_ERRORS", "3"))
+DEFAULT_MAX_IMAGE_SIDE = int(os.environ.get("LMSTUDIO_MAX_IMAGE_SIDE", "1024"))
+DEFAULT_MAX_OUTPUT_TOKENS = int(os.environ.get("LMSTUDIO_MAX_OUTPUT_TOKENS", "512"))
 
 ALLOWED_EXTS = {".mp4", ".mov", ".avi", ".webm", ".mkv", ".m4v"}
 ALLOWED_IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
@@ -58,7 +60,30 @@ def frame_indices(total_frames:int, num_frames:int, sampling:str):
     step = (total_frames - 1) / (n - 1)
     return [int(round(i * step)) for i in range(n)]
 
-def extract_frames(video_path:str, num_frames:int, sampling:str):
+def _resize_image_for_vision(im:Image.Image, max_side:int=DEFAULT_MAX_IMAGE_SIDE)->Image.Image:
+    """Downscale large images before sending them to LM Studio.
+
+    Multimodal GGUF servers count image patches/tokens against the context
+    budget. Huge source images can blow up per-slot context when parallelism
+    is increased. A max_side of 768-1024 is usually plenty for captioning.
+    Use 0 or a negative value to disable resizing.
+    """
+    try:
+        max_side = int(max_side)
+    except (TypeError, ValueError):
+        max_side = DEFAULT_MAX_IMAGE_SIDE
+    if max_side <= 0:
+        return im
+    w, h = im.size
+    longest = max(w, h)
+    if longest <= max_side:
+        return im
+    scale = max_side / float(longest)
+    new_size = (max(1, int(round(w * scale))), max(1, int(round(h * scale))))
+    return im.resize(new_size, Image.Resampling.LANCZOS)
+
+
+def extract_frames(video_path:str, num_frames:int, sampling:str, max_image_side:int=DEFAULT_MAX_IMAGE_SIDE):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise RuntimeError(f"Failed to open video: {video_path}")
@@ -72,6 +97,7 @@ def extract_frames(video_path:str, num_frames:int, sampling:str):
             continue
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         pil = Image.fromarray(frame_rgb)
+        pil = _resize_image_for_vision(pil, max_image_side)
         buf = io.BytesIO()
         pil.save(buf, format="JPEG", quality=90)
         b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
@@ -79,13 +105,14 @@ def extract_frames(video_path:str, num_frames:int, sampling:str):
     cap.release()
     return images
 
-def image_to_data_url(image_path:str)->str:
-    """Load an image from disk and return a JPEG data URL."""
+def image_to_data_url(image_path:str, max_image_side:int=DEFAULT_MAX_IMAGE_SIDE)->str:
+    """Load an image from disk, optionally downscale it, and return a JPEG data URL."""
     with Image.open(image_path) as im:
         if im.mode not in ("RGB", "RGBA"):
             im = im.convert("RGB")
         if im.mode == "RGBA":
             im = im.convert("RGB")
+        im = _resize_image_for_vision(im, max_image_side)
         buf = io.BytesIO()
         im.save(buf, format="JPEG", quality=92)
         b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
@@ -143,7 +170,7 @@ def _is_retryable_lmstudio_status(status_code:int)->bool:
     return status_code in {400, 408, 409, 425, 429, 500, 502, 503, 504}
 
 
-def call_lmstudio_vision(images_data_urls, system_prompt:str, model:str, prefill:str="", media_kind:str="clip"):
+def call_lmstudio_vision(images_data_urls, system_prompt:str, model:str, prefill:str="", media_kind:str="clip", max_output_tokens:int=DEFAULT_MAX_OUTPUT_TOKENS):
     if media_kind == "image":
         lead_text = "You are given a single still image. Write a descriptive caption."
     else:
@@ -164,6 +191,13 @@ def call_lmstudio_vision(images_data_urls, system_prompt:str, model:str, prefill
         "temperature": 0.2,
         "add_generation_prompt": True
     }
+
+    try:
+        max_output_tokens = int(max_output_tokens)
+    except (TypeError, ValueError):
+        max_output_tokens = DEFAULT_MAX_OUTPUT_TOKENS
+    if max_output_tokens > 0:
+        payload["max_tokens"] = max_output_tokens
 
     if prefill and prefill.strip():
         messages.append({"role":"assistant","content": prefill})
@@ -187,7 +221,11 @@ def call_lmstudio_vision(images_data_urls, system_prompt:str, model:str, prefill
             detail = _lmstudio_error_detail(r)
             msg = f"LM Studio HTTP {r.status_code}: {detail}"
             last_error = LMStudioRequestError(r.status_code, msg, detail)
-            retryable = _is_retryable_lmstudio_status(r.status_code)
+            detail_lower = detail.lower()
+            if "context size" in detail_lower or "context length" in detail_lower or "context window" in detail_lower:
+                retryable = False
+            else:
+                retryable = _is_retryable_lmstudio_status(r.status_code)
 
         if attempt < attempts and retryable:
             # Jitter avoids every worker retrying at the exact same moment.
@@ -218,6 +256,8 @@ def chat_caption():
 
     model = request.form.get("model", DEFAULT_MODEL)
     prefill = request.form.get("prefill","")
+    max_image_side = _clamp_int(request.form.get("max_image_side", DEFAULT_MAX_IMAGE_SIDE), DEFAULT_MAX_IMAGE_SIDE, 0, 8192)
+    max_output_tokens = _clamp_int(request.form.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS), DEFAULT_MAX_OUTPUT_TOKENS, 0, 8192)
     use_existing = request.form.get("use_existing_caption","false").lower() in ("1","true","yes","on")
     existing_caption_text = request.form.get("existing_caption","")
 
@@ -236,7 +276,7 @@ def chat_caption():
         if image_mode:
             if not allowed_image(upload_path):
                 raise RuntimeError("Unsupported image file extension")
-            imgs = [image_to_data_url(upload_path)]
+            imgs = [image_to_data_url(upload_path, max_image_side=max_image_side)]
         else:
             if not allowed_video(upload_path):
                 raise RuntimeError("Unsupported video file extension")
@@ -245,12 +285,12 @@ def chat_caption():
             except:
                 num_frames = 5
             sampling = request.form.get("sampling_type","uniform")
-            imgs = extract_frames(upload_path, num_frames, sampling)
+            imgs = extract_frames(upload_path, num_frames, sampling, max_image_side=max_image_side)
 
         if not imgs:
             raise RuntimeError("No visual inputs found for captioning")
 
-        caption = call_lmstudio_vision(imgs, system_prompt_in, model, prefill=prefill, media_kind=media_kind)
+        caption = call_lmstudio_vision(imgs, system_prompt_in, model, prefill=prefill, media_kind=media_kind, max_output_tokens=max_output_tokens)
         return jsonify({"caption": caption, "frames_used": len(imgs)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -291,6 +331,8 @@ def _process_one_target(fn:str, params:dict):
     overwrite = params["overwrite"]
     prepend_existing = params["prepend_existing"]
     use_existing = params["use_existing_caption"]
+    max_image_side = params.get("max_image_side", DEFAULT_MAX_IMAGE_SIDE)
+    max_output_tokens = params.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS)
 
     media_kind = "image" if image_mode else "clip"
     in_path = os.path.join(folder, fn)
@@ -317,14 +359,14 @@ def _process_one_target(fn:str, params:dict):
         # Prepare inputs. This happens inside the worker, so multiple files can be prepared
         # and sent to LM Studio at once.
         if image_mode:
-            imgs = [image_to_data_url(in_path)]
+            imgs = [image_to_data_url(in_path, max_image_side=max_image_side)]
         else:
-            imgs = extract_frames(in_path, num_frames, sampling)
+            imgs = extract_frames(in_path, num_frames, sampling, max_image_side=max_image_side)
 
         if not imgs:
             raise RuntimeError("No visual inputs found for captioning")
 
-        caption = call_lmstudio_vision(imgs, sys_for_this, model, prefill=prefill, media_kind=media_kind)
+        caption = call_lmstudio_vision(imgs, sys_for_this, model, prefill=prefill, media_kind=media_kind, max_output_tokens=max_output_tokens)
 
         if os.path.exists(out_txt) and prepend_existing:
             try:
@@ -424,9 +466,12 @@ def _run_batch(job_id:str):
                     if abort_after_server_errors and job["server_error_count"] >= abort_after_server_errors:
                         job["cancel"] = True
                         job["status"] = "failing"
+                        context_hint = ""
+                        if "context size" in str(res.get("error", "")).lower():
+                            context_hint = " Context was exceeded; use fewer parallel slots, raise LM Studio Context Length, or lower Max image side / Max output tokens."
                         job["abort_reason"] = (
-                            f"Stopped after {job['server_error_count']} LM Studio/API errors. "
-                            "Lower Parallel batch workers / Max Concurrent Predictions, then rerun. "
+                            f"Stopped after {job['server_error_count']} LM Studio/API errors."
+                            f"{context_hint} "
                             "Already-written captions are left alone."
                         )
             work_q.task_done()
@@ -471,6 +516,8 @@ def batch_start():
     overwrite = bool(data.get("overwrite", False))
     prepend_existing = bool(data.get("prepend_existing", False))
     use_existing = bool(data.get("use_existing_caption", False))
+    max_image_side = _clamp_int(data.get("max_image_side", DEFAULT_MAX_IMAGE_SIDE), DEFAULT_MAX_IMAGE_SIDE, 0, 8192)
+    max_output_tokens = _clamp_int(data.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS), DEFAULT_MAX_OUTPUT_TOKENS, 0, 8192)
     max_concurrent = _clamp_int(data.get("max_concurrent", DEFAULT_BATCH_CONCURRENCY), DEFAULT_BATCH_CONCURRENCY, 1, MAX_BATCH_CONCURRENCY)
     abort_after_server_errors = _clamp_int(data.get("abort_after_server_errors", LMSTUDIO_ABORT_AFTER_SERVER_ERRORS), LMSTUDIO_ABORT_AFTER_SERVER_ERRORS, 0, 999)
 
@@ -486,6 +533,8 @@ def batch_start():
         "overwrite": overwrite,
         "prepend_existing": prepend_existing,
         "use_existing_caption": use_existing,
+        "max_image_side": max_image_side,
+        "max_output_tokens": max_output_tokens,
         "max_concurrent": max_concurrent,
         "abort_after_server_errors": abort_after_server_errors
     }
@@ -513,7 +562,7 @@ def batch_start():
     t.start()
 
     total_guess = len(_select_targets(folder, image_mode))
-    return jsonify({"job_id": job_id, "total": total_guess, "max_concurrent": max_concurrent})
+    return jsonify({"job_id": job_id, "total": total_guess, "max_concurrent": max_concurrent, "max_image_side": max_image_side, "max_output_tokens": max_output_tokens})
 
 @app.route("/api/batch-progress", methods=["GET"])
 def batch_progress():

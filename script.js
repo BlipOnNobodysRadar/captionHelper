@@ -32,6 +32,8 @@ async function postChatCaption(file) {
   fd.append('sampling_type', document.getElementById('samplingType').value);
   fd.append('model', document.getElementById('modelName').value);
   fd.append('prefill', document.getElementById('prefill').value);
+  fd.append('max_image_side', document.getElementById('maxImageSide').value);
+  fd.append('max_output_tokens', document.getElementById('maxOutputTokens').value);
   fd.append('use_existing_caption', document.getElementById('useExistingCaption').checked);
   fd.append('existing_caption', document.getElementById('existingCaption').value);
   fd.append('image_mode', imageModeToggle && imageModeToggle.checked);
@@ -114,6 +116,8 @@ function getBatchBody() {
     model: document.getElementById('modelName').value,
     prefill: document.getElementById('prefill').value,
     num_frames: Number(document.getElementById('numFrames').value),
+    max_image_side: Number(document.getElementById('maxImageSide').value),
+    max_output_tokens: Number(document.getElementById('maxOutputTokens').value),
     max_concurrent: Number(document.getElementById('maxConcurrent').value),
     abort_after_server_errors: Number(document.getElementById('abortAfterServerErrors').value),
     sampling_type: document.getElementById('samplingType').value,

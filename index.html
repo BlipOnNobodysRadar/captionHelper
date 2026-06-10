@@ -50,15 +50,27 @@
         </div>
 
         <div class="row">
+          <label>Max image side:</label>
+          <input id="maxImageSide" type="number" min="0" max="8192" value="1024">
+          <small style="color:#8a90a6">Downscales images/frames before sending them. Lower this if parallel runs hit context errors. 0 disables resizing.</small>
+        </div>
+
+        <div class="row">
+          <label>Max output tokens:</label>
+          <input id="maxOutputTokens" type="number" min="0" max="8192" value="0">
+          <small style="color:#8a90a6">Caps caption length so LM Studio does not reserve too much context. 0 omits the cap.</small>
+        </div>
+
+        <div class="row">
           <label>Parallel batch workers:</label>
           <input id="maxConcurrent" type="number" min="1" max="16" value="4">
-          <small style="color:#8a90a6">Match LM Studio's Parallel value, or lower it if VRAM/latency gets ugly. 4-8 is usually the sane testing range.</small>
+          <small style="color:#8a90a6">Match LM Studio's Parallel value (batch size), or lower it if VRAM/latency is an issue. If you raise the value of Parallel in LMStudio you must also increase the context limit to accomodate it.</small>
         </div>
 
         <div class="row">
           <label>Abort after LM Studio/API errors:</label>
           <input id="abortAfterServerErrors" type="number" min="0" max="999" value="3">
-          <small style="color:#8a90a6">Stops a bad concurrency setting before it burns through the whole folder. Use 0 to disable.</small>
+          <small style="color:#8a90a6">Stops captioning the batch if encountered X amount of errors. Use 0 to disable.</small>
         </div>
 
         <div class="row">
@@ -78,7 +90,7 @@
 
         <div class="row">
           <label>Assistant response prefill:</label>
-          <input id="prefill" placeholder="(optional prefix, continues from here)">
+          <input id="prefill" placeholder="(optional prefix, continues from here, prefill not included in final output)">
         </div>
       </section>
 

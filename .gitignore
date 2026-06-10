@@ -1,19 +1,24 @@
 # Python
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
 .venv/
 venv/
 env/
 
 # Runtime/temp
-tmp_uploads/
 *.log
+tmp_uploads/
 
-# Local env/config
+# Local config/secrets
 .env
 .env.*
 
-# Generated captions / datasets
+# Generated captions / local datasets
 *.txt
 
 # OS/editor
