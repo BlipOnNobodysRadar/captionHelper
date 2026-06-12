@@ -16,6 +16,51 @@ if (imageModeToggle) {
   refreshAccept();
 }
 
+
+async function loadBackendConfig() {
+  try {
+    const res = await fetch('/api/config');
+    const cfg = await res.json();
+    const backendInfo = document.getElementById('backendInfo');
+    if (backendInfo) {
+      backendInfo.textContent = `Backend: ${cfg.backend_display_name || cfg.backend} at ${cfg.api_base_url}`;
+    }
+
+    const modelName = document.getElementById('modelName');
+    if (modelName && cfg.default_model && !modelName.value) {
+      modelName.value = cfg.default_model;
+      modelName.placeholder = cfg.default_model;
+    }
+
+    const maxImageSide = document.getElementById('maxImageSide');
+    if (maxImageSide && Number.isFinite(Number(cfg.max_image_side))) {
+      maxImageSide.value = cfg.max_image_side;
+    }
+
+    const maxOutputTokens = document.getElementById('maxOutputTokens');
+    if (maxOutputTokens && Number.isFinite(Number(cfg.max_output_tokens))) {
+      maxOutputTokens.value = cfg.max_output_tokens;
+    }
+
+    const maxConcurrent = document.getElementById('maxConcurrent');
+    if (maxConcurrent && Number.isFinite(Number(cfg.default_batch_concurrency))) {
+      maxConcurrent.value = cfg.default_batch_concurrency;
+      if (Number.isFinite(Number(cfg.max_batch_concurrency))) {
+        maxConcurrent.max = cfg.max_batch_concurrency;
+      }
+    }
+
+    const abortAfter = document.getElementById('abortAfterServerErrors');
+    if (abortAfter && Number.isFinite(Number(cfg.abort_after_server_errors))) {
+      abortAfter.value = cfg.abort_after_server_errors;
+    }
+  } catch (e) {
+    const backendInfo = document.getElementById('backendInfo');
+    if (backendInfo) backendInfo.textContent = 'Backend: unable to load config';
+  }
+}
+loadBackendConfig();
+
 function addMsg(who, text) {
   const div = document.createElement('div');
   div.className = 'msg ' + who;
@@ -46,7 +91,7 @@ sendBtn.addEventListener('click', async () => {
   const file = clipInput.files?.[0];
   if (!file) { addMsg('assistant', 'Attach a file first.'); return; }
   addMsg('user', `Attached: ${file.name}`);
-  addMsg('assistant', 'Thinking... preparing inputs and querying LM Studio');
+  addMsg('assistant', 'Thinking... preparing inputs and querying the local vision backend');
 
   const out = await postChatCaption(file);
   if (out.error) {
