@@ -1,8 +1,8 @@
 # Caption Helper
 
-A small local web UI for captioning images and short video clips with an LM Studio-compatible `/v1/chat/completions` endpoint.
+A small local web UI for captioning images and short video clips with a local OpenAI-compatible `/v1/chat/completions` endpoint. It defaults to `llama.cpp`/`llama-server`, while keeping LM Studio compatibility through environment variables.
 
-It is meant for dataset prep: point it at a folder of images or clips, choose a vision model loaded in LM Studio, and write matching `.txt` caption files next to the source files.
+It is meant for dataset prep: point it at a folder of images or clips, choose a vision model loaded in llama.cpp/llama-server, LM Studio, or another compatible backend, and write matching `.txt` caption files next to the source files.
 
 ## Features
 
@@ -12,22 +12,24 @@ It is meant for dataset prep: point it at a folder of images or clips, choose a 
 - Optional existing-caption grounding from matching `.txt` files.
 - Assistant response prefill.
 - Batch progress, cancel, active-file display, elapsed time, ETA, captions/minute, and per-item duration.
-- Parallel batch workers for LM Studio's concurrent prediction slots.
+- Parallel batch workers for llama.cpp slots, LM Studio concurrent prediction slots, or other backend concurrency.
 - Max image side downscaling to reduce multimodal context pressure.
 - Max output token cap for shorter, safer caption generations.
-- Better LM Studio/API error messages, retries, and a fail-fast guard so a bad concurrency/context setting does not chew through an entire folder.
+- Better backend/API error messages, retries, and a fail-fast guard so a bad concurrency/context setting does not chew through an entire folder.
 
 ## Requirements
 
 - Python 3.10 or newer.
 - [uv](https://docs.astral.sh/uv/) for Python environment and dependency management.
-- LM Studio running a local server with a vision-capable model loaded.
+- `llama-server` from [llama.cpp](https://github.com/ggml-org/llama.cpp) running with a vision-capable model/projector, or another OpenAI-compatible vision backend such as LM Studio.
 
-The default LM Studio endpoint is:
+The default backend is llama.cpp at:
 
 ```text
-http://localhost:1234/v1
+http://localhost:8080/v1
 ```
+
+LM Studio is still supported by setting `CAPTION_BACKEND=lmstudio` or `LMSTUDIO_BASE_URL=http://localhost:1234/v1`.
 
 ## Install uv
 
@@ -94,12 +96,29 @@ Windows PowerShell:
 python app.py
 ```
 
+## llama.cpp setup
+
+1. Start a llama.cpp `llama-server` with a vision-capable GGUF model and the matching multimodal projector/options required by that model.
+2. Keep the default llama.cpp HTTP server port (`8080`) or set `CAPTION_API_BASE_URL` / `LLAMA_CPP_BASE_URL` to your custom `/v1` base URL.
+3. In the app, set the model name to the name your server accepts. llama.cpp generally accepts any non-empty model string for OpenAI-compatible requests, but using a descriptive name is helpful for logs.
+
+Example run command shape (adjust model/projector paths for your model):
+
+```bash
+llama-server -m /path/to/vision-model.gguf --mmproj /path/to/mmproj.gguf --host 127.0.0.1 --port 8080
+```
+
+llama.cpp's server exposes the OpenAI-compatible chat completions endpoint at `/v1/chat/completions`; captionHelper uses the base URL `http://localhost:8080/v1` by default.
+
+For parallel batch captioning, the app's **Parallel batch workers** should usually be equal to or lower than the number of llama.cpp slots/parallel requests you configured.
+
 ## LM Studio setup
 
 1. Open LM Studio.
 2. Load a vision-capable model.
 3. Start the local server.
-4. In the app, set the model name to match the loaded model.
+4. Start captionHelper with `CAPTION_BACKEND=lmstudio` or `CAPTION_API_BASE_URL=http://localhost:1234/v1`.
+5. In the app, set the model name to match the loaded model.
 
 For parallel batch captioning, LM Studio's **Max Concurrent Predictions** should usually be equal to or greater than the app's **Parallel batch workers** setting.
 
@@ -128,20 +147,20 @@ This is useful for converting booru tags, rough captions, or older captions into
 
 ## Parallel/context guidance
 
-The UI's **Parallel batch workers** should usually be less than or equal to LM Studio's **Max Concurrent Predictions**.
+The UI's **Parallel batch workers** should usually be less than or equal to llama.cpp slots/parallel requests or LM Studio's **Max Concurrent Predictions**.
 
 For GGUF/llama.cpp-style serving, parallel vision requests can put heavy pressure on the available context/KV cache. A useful rough mental model is:
 
 ```text
-per-slot context ~= LM Studio Context Length / Max Concurrent Predictions
+per-slot context ~= backend context length / backend parallel slots
 ```
 
 So `20000 / 4` gives roughly 5000 tokens per slot, while `20000 / 12` gives roughly 1667 tokens per slot. Large images or video frame batches can exceed that quickly because multimodal image patches count against context too.
 
 For image captioning, start at 4 parallel workers. Test 6, 8, or 12 by comparing captions/minute. If you see `Context size has been exceeded`, do one or more of these:
 
-- lower **Parallel batch workers** and LM Studio **Max Concurrent Predictions**;
-- raise LM Studio **Context Length**, if VRAM allows;
+- lower **Parallel batch workers** and your backend slot/concurrency setting;
+- raise the backend context length/KV cache setting, if VRAM allows;
 - lower **Max image side** from 1024 to 768 or 640;
 - lower **Max output tokens** from 512 to 256.
 
@@ -152,22 +171,25 @@ Avoid setting **Max image side** to `0` during high-parallel runs unless the sou
 You can override defaults with environment variables.
 
 ```bash
-LMSTUDIO_BASE_URL="http://localhost:1234/v1" uv run python app.py
+CAPTION_API_BASE_URL="http://localhost:8080/v1" uv run python app.py
 ```
 
 Available variables:
 
 | Variable | Default | Meaning |
 |---|---:|---|
-| `LMSTUDIO_BASE_URL` | `http://localhost:1234/v1` | LM Studio-compatible API base URL. |
-| `LMSTUDIO_MODEL` | `qwen2.5-vl-32b-instruct` | Default model name sent to the API. |
-| `LMSTUDIO_BATCH_CONCURRENCY` | `4` | Default parallel batch workers shown in the UI. |
-| `LMSTUDIO_MAX_BATCH_CONCURRENCY` | `16` | Hard cap for parallel workers accepted by the backend. |
-| `LMSTUDIO_REQUEST_RETRIES` | `2` | Number of retries after API/request failures. |
-| `LMSTUDIO_RETRY_BACKOFF_SEC` | `2` | Base retry backoff in seconds. |
-| `LMSTUDIO_ABORT_AFTER_SERVER_ERRORS` | `3` | Abort batch after this many API-level errors. Set `0` to disable. |
-| `LMSTUDIO_MAX_IMAGE_SIDE` | `1024` | Default max image dimension before sending to LM Studio. Set `0` to disable resizing. |
-| `LMSTUDIO_MAX_OUTPUT_TOKENS` | `512` | Default generation limit for captions. |
+| `CAPTION_BACKEND` | `llamacpp` | Backend preset. Use `llamacpp`, `lmstudio`, or `openai`. Common aliases such as `llama.cpp` and `lm-studio` also work. |
+| `CAPTION_API_BASE_URL` | `http://localhost:8080/v1` | OpenAI-compatible API base URL. For LM Studio use `http://localhost:1234/v1`. |
+| `CAPTION_MODEL` | `qwen2.5-vl-32b-instruct` | Default model name sent to the API. |
+| `CAPTION_BATCH_CONCURRENCY` | `4` | Default parallel batch workers shown in the UI. |
+| `CAPTION_MAX_BATCH_CONCURRENCY` | `16` | Hard cap for parallel workers accepted by the backend. |
+| `CAPTION_REQUEST_RETRIES` | `2` | Number of retries after API/request failures. |
+| `CAPTION_RETRY_BACKOFF_SEC` | `2` | Base retry backoff in seconds. |
+| `CAPTION_ABORT_AFTER_SERVER_ERRORS` | `3` | Abort batch after this many API-level errors. Set `0` to disable. |
+| `CAPTION_MAX_IMAGE_SIDE` | `1024` | Default max image dimension before sending to the backend. Set `0` to disable resizing. |
+| `CAPTION_MAX_OUTPUT_TOKENS` | `512` | Default generation limit for captions. |
+
+Backwards-compatible `LMSTUDIO_*` variables still work. New `LLAMA_CPP_*` aliases are also accepted, for example `LLAMA_CPP_BASE_URL` and `LLAMA_CPP_MODEL`. `LAMMA_CPP_*` is accepted as a typo-tolerant alias.
 
 ## Fallback setup without uv
 

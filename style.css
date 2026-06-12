@@ -81,3 +81,9 @@ html, body { min-width: 0; overflow-x: hidden; }
   word-break: break-word;
   overflow-x: hidden;
 }
+.backend-info {
+  color: var(--muted);
+  font-size: 12px;
+  margin: -6px 0 12px;
+  overflow-wrap: anywhere;
+}

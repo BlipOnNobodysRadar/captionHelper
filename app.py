@@ -13,15 +13,82 @@ import cv2
 from PIL import Image
 
 # ------------------ Config ------------------
-LMSTUDIO_BASE_URL = os.environ.get("LMSTUDIO_BASE_URL", "http://localhost:1234/v1")
-DEFAULT_MODEL = os.environ.get("LMSTUDIO_MODEL", "qwen2.5-vl-32b-instruct")
-DEFAULT_BATCH_CONCURRENCY = int(os.environ.get("LMSTUDIO_BATCH_CONCURRENCY", "4"))
-MAX_BATCH_CONCURRENCY = int(os.environ.get("LMSTUDIO_MAX_BATCH_CONCURRENCY", "16"))
-LMSTUDIO_REQUEST_RETRIES = int(os.environ.get("LMSTUDIO_REQUEST_RETRIES", "2"))
-LMSTUDIO_RETRY_BACKOFF_SEC = float(os.environ.get("LMSTUDIO_RETRY_BACKOFF_SEC", "2"))
-LMSTUDIO_ABORT_AFTER_SERVER_ERRORS = int(os.environ.get("LMSTUDIO_ABORT_AFTER_SERVER_ERRORS", "3"))
-DEFAULT_MAX_IMAGE_SIDE = int(os.environ.get("LMSTUDIO_MAX_IMAGE_SIDE", "1024"))
-DEFAULT_MAX_OUTPUT_TOKENS = int(os.environ.get("LMSTUDIO_MAX_OUTPUT_TOKENS", "512"))
+def _env_first(*names, default=None):
+    for name in names:
+        value = os.environ.get(name)
+        if value is not None and str(value).strip() != "":
+            return value
+    return default
+
+
+def _normalize_backend(value:str)->str:
+    normalized = (value or "llamacpp").strip().lower().replace("_", "-")
+    aliases = {
+        "llama": "llamacpp",
+        "llama-cpp": "llamacpp",
+        "llama.cpp": "llamacpp",
+        "llamacpp": "llamacpp",
+        "lamma": "llamacpp",
+        "lamma-cpp": "llamacpp",
+        "lamma.cpp": "llamacpp",
+        "lm-studio": "lmstudio",
+        "lmstudio": "lmstudio",
+        "openai-compatible": "openai",
+        "openai": "openai",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _default_backend()->str:
+    configured = _env_first("CAPTION_BACKEND", "LLM_BACKEND", "CAPTIONHELPER_BACKEND")
+    if configured:
+        return configured
+    if _env_first("LMSTUDIO_BASE_URL", "LMSTUDIO_MODEL"):
+        return "lmstudio"
+    if _env_first("LLAMA_CPP_BASE_URL", "LLAMA_CPP_MODEL", "LAMMA_CPP_BASE_URL", "LAMMA_CPP_MODEL"):
+        return "llamacpp"
+    return "llamacpp"
+
+
+BACKEND = _normalize_backend(_default_backend())
+_BACKEND_DEFAULT_BASE_URLS = {
+    "llamacpp": "http://localhost:8080/v1",
+    "lmstudio": "http://localhost:1234/v1",
+    "openai": "http://localhost:8080/v1",
+}
+BACKEND_DISPLAY_NAMES = {
+    "llamacpp": "llama.cpp",
+    "lmstudio": "LM Studio",
+    "openai": "OpenAI-compatible",
+}
+API_BASE_URL = _env_first(
+    "CAPTION_API_BASE_URL",
+    "LLAMA_CPP_BASE_URL",
+    "LAMMA_CPP_BASE_URL",
+    "LMSTUDIO_BASE_URL",
+    default=_BACKEND_DEFAULT_BASE_URLS.get(BACKEND, _BACKEND_DEFAULT_BASE_URLS["openai"]),
+).rstrip("/")
+DEFAULT_MODEL = _env_first(
+    "CAPTION_MODEL",
+    "LLAMA_CPP_MODEL",
+    "LAMMA_CPP_MODEL",
+    "LMSTUDIO_MODEL",
+    default="qwen2.5-vl-32b-instruct",
+)
+DEFAULT_BATCH_CONCURRENCY = int(_env_first("CAPTION_BATCH_CONCURRENCY", "LLAMA_CPP_BATCH_CONCURRENCY", "LAMMA_CPP_BATCH_CONCURRENCY", "LMSTUDIO_BATCH_CONCURRENCY", default="4"))
+MAX_BATCH_CONCURRENCY = int(_env_first("CAPTION_MAX_BATCH_CONCURRENCY", "LLAMA_CPP_MAX_BATCH_CONCURRENCY", "LAMMA_CPP_MAX_BATCH_CONCURRENCY", "LMSTUDIO_MAX_BATCH_CONCURRENCY", default="16"))
+API_REQUEST_RETRIES = int(_env_first("CAPTION_REQUEST_RETRIES", "LLAMA_CPP_REQUEST_RETRIES", "LAMMA_CPP_REQUEST_RETRIES", "LMSTUDIO_REQUEST_RETRIES", default="2"))
+API_RETRY_BACKOFF_SEC = float(_env_first("CAPTION_RETRY_BACKOFF_SEC", "LLAMA_CPP_RETRY_BACKOFF_SEC", "LAMMA_CPP_RETRY_BACKOFF_SEC", "LMSTUDIO_RETRY_BACKOFF_SEC", default="2"))
+API_ABORT_AFTER_SERVER_ERRORS = int(_env_first("CAPTION_ABORT_AFTER_SERVER_ERRORS", "LLAMA_CPP_ABORT_AFTER_SERVER_ERRORS", "LAMMA_CPP_ABORT_AFTER_SERVER_ERRORS", "LMSTUDIO_ABORT_AFTER_SERVER_ERRORS", default="3"))
+DEFAULT_MAX_IMAGE_SIDE = int(_env_first("CAPTION_MAX_IMAGE_SIDE", "LLAMA_CPP_MAX_IMAGE_SIDE", "LAMMA_CPP_MAX_IMAGE_SIDE", "LMSTUDIO_MAX_IMAGE_SIDE", default="1024"))
+DEFAULT_MAX_OUTPUT_TOKENS = int(_env_first("CAPTION_MAX_OUTPUT_TOKENS", "LLAMA_CPP_MAX_OUTPUT_TOKENS", "LAMMA_CPP_MAX_OUTPUT_TOKENS", "LMSTUDIO_MAX_OUTPUT_TOKENS", default="512"))
+BACKEND_DISPLAY_NAME = BACKEND_DISPLAY_NAMES.get(BACKEND, BACKEND_DISPLAY_NAMES["openai"])
+
+# Backwards-compatible names used by older code paths and third-party snippets.
+LMSTUDIO_BASE_URL = API_BASE_URL
+LMSTUDIO_REQUEST_RETRIES = API_REQUEST_RETRIES
+LMSTUDIO_RETRY_BACKOFF_SEC = API_RETRY_BACKOFF_SEC
+LMSTUDIO_ABORT_AFTER_SERVER_ERRORS = API_ABORT_AFTER_SERVER_ERRORS
 
 ALLOWED_EXTS = {".mp4", ".mov", ".avi", ".webm", ".mkv", ".m4v"}
 ALLOWED_IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
@@ -61,7 +128,7 @@ def frame_indices(total_frames:int, num_frames:int, sampling:str):
     return [int(round(i * step)) for i in range(n)]
 
 def _resize_image_for_vision(im:Image.Image, max_side:int=DEFAULT_MAX_IMAGE_SIDE)->Image.Image:
-    """Downscale large images before sending them to LM Studio.
+    """Downscale large images before sending them to a local vision API.
 
     Multimodal GGUF servers count image patches/tokens against the context
     budget. Huge source images can blow up per-slot context when parallelism
@@ -130,7 +197,7 @@ def augment_system_with_existing(system_prompt:str, existing_caption:str, media_
     )
     return (system_prompt or "").rstrip() + addon
 
-class LMStudioRequestError(RuntimeError):
+class VisionAPIRequestError(RuntimeError):
     def __init__(self, status_code=None, message="", body=""):
         self.status_code = status_code
         self.body = body
@@ -144,7 +211,7 @@ def _shorten(text:str, limit:int=700)->str:
     return text[:limit].rstrip() + " …"
 
 
-def _lmstudio_error_detail(response):
+def _api_error_detail(response):
     body_text = ""
     try:
         data = response.json()
@@ -163,14 +230,14 @@ def _lmstudio_error_detail(response):
     return _shorten(body_text) or response.reason or "No response body"
 
 
-def _is_retryable_lmstudio_status(status_code:int)->bool:
+def _is_retryable_api_status(status_code:int)->bool:
     # 400 is normally not retryable, but LM Studio/local llama.cpp servers can emit it
     # during overloaded multimodal/parallel batches. Retrying once keeps a brief
     # overload hiccup from ruining a whole batch, while still surfacing real bad payloads.
     return status_code in {400, 408, 409, 425, 429, 500, 502, 503, 504}
 
 
-def call_lmstudio_vision(images_data_urls, system_prompt:str, model:str, prefill:str="", media_kind:str="clip", max_output_tokens:int=DEFAULT_MAX_OUTPUT_TOKENS):
+def call_vision_api(images_data_urls, system_prompt:str, model:str, prefill:str="", media_kind:str="clip", max_output_tokens:int=DEFAULT_MAX_OUTPUT_TOKENS):
     if media_kind == "image":
         lead_text = "You are given a single still image. Write a descriptive caption."
     else:
@@ -189,8 +256,9 @@ def call_lmstudio_vision(images_data_urls, system_prompt:str, model:str, prefill
         "model": model or DEFAULT_MODEL,
         "messages": messages,
         "temperature": 0.2,
-        "add_generation_prompt": True
     }
+    if BACKEND == "lmstudio":
+        payload["add_generation_prompt"] = True
 
     try:
         max_output_tokens = int(max_output_tokens)
@@ -201,45 +269,61 @@ def call_lmstudio_vision(images_data_urls, system_prompt:str, model:str, prefill
 
     if prefill and prefill.strip():
         messages.append({"role":"assistant","content": prefill})
-        payload["add_generation_prompt"] = False
+        if BACKEND == "lmstudio":
+            payload["add_generation_prompt"] = False
 
-    url = f"{LMSTUDIO_BASE_URL}/chat/completions"
-    attempts = max(1, LMSTUDIO_REQUEST_RETRIES)
+    url = f"{API_BASE_URL}/chat/completions"
+    attempts = max(1, API_REQUEST_RETRIES)
     last_error = None
 
     for attempt in range(1, attempts + 1):
         try:
             r = requests.post(url, json=payload, timeout=300)
         except requests.RequestException as e:
-            last_error = LMStudioRequestError(None, f"LM Studio request failed: {e}", str(e))
+            last_error = VisionAPIRequestError(None, f"Vision API request failed: {e}", str(e))
             retryable = True
         else:
             if r.ok:
                 data = r.json()
                 return data["choices"][0]["message"]["content"].strip()
 
-            detail = _lmstudio_error_detail(r)
-            msg = f"LM Studio HTTP {r.status_code}: {detail}"
-            last_error = LMStudioRequestError(r.status_code, msg, detail)
+            detail = _api_error_detail(r)
+            msg = f"{BACKEND_DISPLAY_NAME} HTTP {r.status_code}: {detail}"
+            last_error = VisionAPIRequestError(r.status_code, msg, detail)
             detail_lower = detail.lower()
             if "context size" in detail_lower or "context length" in detail_lower or "context window" in detail_lower:
                 retryable = False
             else:
-                retryable = _is_retryable_lmstudio_status(r.status_code)
+                retryable = _is_retryable_api_status(r.status_code)
 
         if attempt < attempts and retryable:
             # Jitter avoids every worker retrying at the exact same moment.
-            delay = LMSTUDIO_RETRY_BACKOFF_SEC * attempt + random.uniform(0.0, 1.5)
+            delay = API_RETRY_BACKOFF_SEC * attempt + random.uniform(0.0, 1.5)
             time.sleep(delay)
             continue
         raise last_error
 
-    raise last_error or LMStudioRequestError(None, "LM Studio request failed for an unknown reason")
+    raise last_error or VisionAPIRequestError(None, "Vision API request failed for an unknown reason")
 
 # ------------------ Simple chat route ------------------
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+@app.route("/api/config", methods=["GET"])
+def api_config():
+    return jsonify({
+        "backend": BACKEND,
+        "backend_display_name": BACKEND_DISPLAY_NAME,
+        "api_base_url": API_BASE_URL,
+        "default_model": DEFAULT_MODEL,
+        "default_batch_concurrency": DEFAULT_BATCH_CONCURRENCY,
+        "max_batch_concurrency": MAX_BATCH_CONCURRENCY,
+        "abort_after_server_errors": API_ABORT_AFTER_SERVER_ERRORS,
+        "max_image_side": DEFAULT_MAX_IMAGE_SIDE,
+        "max_output_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
+    })
 
 @app.route("/api/chat-caption", methods=["POST"])
 def chat_caption():
@@ -290,7 +374,7 @@ def chat_caption():
         if not imgs:
             raise RuntimeError("No visual inputs found for captioning")
 
-        caption = call_lmstudio_vision(imgs, system_prompt_in, model, prefill=prefill, media_kind=media_kind, max_output_tokens=max_output_tokens)
+        caption = call_vision_api(imgs, system_prompt_in, model, prefill=prefill, media_kind=media_kind, max_output_tokens=max_output_tokens)
         return jsonify({"caption": caption, "frames_used": len(imgs)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -357,7 +441,7 @@ def _process_one_target(fn:str, params:dict):
                 sys_for_this = augment_system_with_existing(system_prompt_in, old_text, media_kind)
 
         # Prepare inputs. This happens inside the worker, so multiple files can be prepared
-        # and sent to LM Studio at once.
+        # and sent to the local vision API at once.
         if image_mode:
             imgs = [image_to_data_url(in_path, max_image_side=max_image_side)]
         else:
@@ -366,7 +450,7 @@ def _process_one_target(fn:str, params:dict):
         if not imgs:
             raise RuntimeError("No visual inputs found for captioning")
 
-        caption = call_lmstudio_vision(imgs, sys_for_this, model, prefill=prefill, media_kind=media_kind, max_output_tokens=max_output_tokens)
+        caption = call_vision_api(imgs, sys_for_this, model, prefill=prefill, media_kind=media_kind, max_output_tokens=max_output_tokens)
 
         if os.path.exists(out_txt) and prepend_existing:
             try:
@@ -382,13 +466,13 @@ def _process_one_target(fn:str, params:dict):
                 fh.write(caption.strip())
 
         return {"file": fn, "ok": True, "out": os.path.basename(out_txt)}
-    except LMStudioRequestError as e:
+    except VisionAPIRequestError as e:
         out = {"file": fn, "ok": False, "error": str(e), "server_error": True}
         if e.status_code is not None:
             out["status_code"] = e.status_code
         return out
     except requests.RequestException as e:
-        return {"file": fn, "ok": False, "error": f"LM Studio request failed: {e}", "server_error": True}
+        return {"file": fn, "ok": False, "error": f"Vision API request failed: {e}", "server_error": True}
     except Exception as e:
         return {"file": fn, "ok": False, "error": str(e), "server_error": False}
 
@@ -403,7 +487,7 @@ def _run_batch(job_id:str):
     folder = params["target_folder"]
     image_mode = params["image_mode"]
     max_concurrent = params["max_concurrent"]
-    abort_after_server_errors = params.get("abort_after_server_errors", LMSTUDIO_ABORT_AFTER_SERVER_ERRORS)
+    abort_after_server_errors = params.get("abort_after_server_errors", API_ABORT_AFTER_SERVER_ERRORS)
     targets = _select_targets(folder, image_mode)
 
     work_q = queue.Queue()
@@ -468,9 +552,9 @@ def _run_batch(job_id:str):
                         job["status"] = "failing"
                         context_hint = ""
                         if "context size" in str(res.get("error", "")).lower():
-                            context_hint = " Context was exceeded; use fewer parallel slots, raise LM Studio Context Length, or lower Max image side / Max output tokens."
+                            context_hint = " Context was exceeded; use fewer parallel slots, raise backend Context Length, or lower Max image side / Max output tokens."
                         job["abort_reason"] = (
-                            f"Stopped after {job['server_error_count']} LM Studio/API errors."
+                            f"Stopped after {job['server_error_count']} vision API errors."
                             f"{context_hint} "
                             "Already-written captions are left alone."
                         )
@@ -519,7 +603,7 @@ def batch_start():
     max_image_side = _clamp_int(data.get("max_image_side", DEFAULT_MAX_IMAGE_SIDE), DEFAULT_MAX_IMAGE_SIDE, 0, 8192)
     max_output_tokens = _clamp_int(data.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS), DEFAULT_MAX_OUTPUT_TOKENS, 0, 8192)
     max_concurrent = _clamp_int(data.get("max_concurrent", DEFAULT_BATCH_CONCURRENCY), DEFAULT_BATCH_CONCURRENCY, 1, MAX_BATCH_CONCURRENCY)
-    abort_after_server_errors = _clamp_int(data.get("abort_after_server_errors", LMSTUDIO_ABORT_AFTER_SERVER_ERRORS), LMSTUDIO_ABORT_AFTER_SERVER_ERRORS, 0, 999)
+    abort_after_server_errors = _clamp_int(data.get("abort_after_server_errors", API_ABORT_AFTER_SERVER_ERRORS), API_ABORT_AFTER_SERVER_ERRORS, 0, 999)
 
     job_id = uuid.uuid4().hex
     params = {

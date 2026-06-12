@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>LM Studio Video/Image Captioner</title>
+  <title>llama.cpp/OpenAI-compatible Video/Image Captioner</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="stylesheet" href="/static/style.css">
 </head>
@@ -10,6 +10,7 @@
   <div class="layout">
     <main class="chat">
       <h2>Multiturn chat outputs, separated between user and LLM</h2>
+      <p id="backendInfo" class="backend-info">Backend: loading…</p>
 
       <div id="chatLog" class="chatlog"></div>
 
@@ -58,17 +59,17 @@
         <div class="row">
           <label>Max output tokens:</label>
           <input id="maxOutputTokens" type="number" min="0" max="8192" value="0">
-          <small style="color:#8a90a6">Caps caption length so LM Studio does not reserve too much context. 0 omits the cap.</small>
+          <small style="color:#8a90a6">Caps caption length so the backend does not reserve too much context. 0 omits the cap.</small>
         </div>
 
         <div class="row">
           <label>Parallel batch workers:</label>
           <input id="maxConcurrent" type="number" min="1" max="16" value="4">
-          <small style="color:#8a90a6">Match LM Studio's Parallel value (batch size), or lower it if VRAM/latency is an issue. If you raise the value of Parallel in LMStudio you must also increase the context limit to accomodate it.</small>
+          <small style="color:#8a90a6">Match your backend slot/parallel setting, or lower it if VRAM/latency is an issue. If you raise backend parallelism, increase the context limit/KV cache as needed.</small>
         </div>
 
         <div class="row">
-          <label>Abort after LM Studio/API errors:</label>
+          <label>Abort after backend/API errors:</label>
           <input id="abortAfterServerErrors" type="number" min="0" max="999" value="3">
           <small style="color:#8a90a6">Stops captioning the batch if encountered X amount of errors. Use 0 to disable.</small>
         </div>
