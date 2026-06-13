@@ -7,6 +7,7 @@ import uuid
 import threading
 import queue
 import random
+import shutil
 import re
 from flask import Flask, render_template, request, jsonify
 import requests
@@ -656,6 +657,55 @@ def chat_caption():
 JOBS = {}
 JOBS_LOCK = threading.Lock()
 
+
+def _safe_filename_fragment(value:str)->str:
+    fragment = str(value or "").strip()
+    if not fragment:
+        return ""
+    # Keep custom naming text in a single filename segment on every platform.
+    return re.sub(r'[\\/:*?"<>|]+', "_", fragment)
+
+
+def _safe_subdir_name(value:str)->str:
+    name = _safe_filename_fragment(value) or "captionHelper_results"
+    name = name.strip(". ") or "captionHelper_results"
+    return name
+
+
+def _build_output_paths(in_path:str, params:dict):
+    folder = params["target_folder"]
+    root, ext = os.path.splitext(os.path.basename(in_path))
+    affix_text = _safe_filename_fragment(params.get("filename_affix_text", ""))
+    affix_position = str(params.get("filename_affix_position") or "prefix").lower()
+
+    if affix_text:
+        out_root = f"{root}{affix_text}" if affix_position == "suffix" else f"{affix_text}{root}"
+    else:
+        out_root = root
+
+    if params.get("output_to_subdir"):
+        out_dir = os.path.join(folder, _safe_subdir_name(params.get("output_subdir_name", "")))
+    else:
+        out_dir = folder
+
+    return {
+        "dir": out_dir,
+        "media": os.path.join(out_dir, out_root + ext),
+        "caption": os.path.join(out_dir, out_root + ".txt"),
+        "needs_media_copy": out_dir != folder or out_root != root,
+    }
+
+
+def _copy_media_if_needed(source_path:str, output_paths:dict, overwrite:bool):
+    if not output_paths.get("needs_media_copy"):
+        return
+    dest_path = output_paths["media"]
+    if os.path.abspath(source_path) == os.path.abspath(dest_path):
+        return
+    if os.path.exists(dest_path) and not overwrite:
+        return
+    shutil.copy2(source_path, dest_path)
+
 def _select_targets(folder:str, image_mode:bool):
     if image_mode:
         selected = [p for p in os.listdir(folder) if allowed_image(os.path.join(folder, p))]
@@ -690,8 +740,10 @@ def _process_one_target(fn:str, params:dict):
 
     media_kind = "image" if image_mode else "clip"
     in_path = os.path.join(folder, fn)
-    base, _ = os.path.splitext(in_path)
-    out_txt = base + ".txt"
+    source_base, _ = os.path.splitext(in_path)
+    source_txt = source_base + ".txt"
+    output_paths = _build_output_paths(in_path, params)
+    out_txt = output_paths["caption"]
 
     # Skip logic. Existing caption grounding implies we usually want to overwrite/prepend,
     # otherwise the safest behavior is still to leave existing caption files alone.
@@ -700,12 +752,14 @@ def _process_one_target(fn:str, params:dict):
 
     try:
         old_text = ""
-        if use_existing and os.path.exists(out_txt):
-            try:
-                with open(out_txt, "r", encoding="utf-8") as fh:
-                    old_text = fh.read().strip()
-            except Exception:
-                old_text = ""
+        if use_existing:
+            grounding_txt = source_txt if os.path.exists(source_txt) else out_txt
+            if os.path.exists(grounding_txt):
+                try:
+                    with open(grounding_txt, "r", encoding="utf-8") as fh:
+                        old_text = fh.read().strip()
+                except Exception:
+                    old_text = ""
 
         # Prepare inputs. This happens inside the worker, so multiple files can be prepared
         # and sent to the local vision API at once.
@@ -721,6 +775,9 @@ def _process_one_target(fn:str, params:dict):
         user_prompt = _render_user_template(user_template, context)
         caption = call_vision_api(imgs, system_prompt_in, model, prefill=prefill, media_kind=media_kind, max_output_tokens=max_output_tokens, user_prompt=user_prompt)
 
+        os.makedirs(output_paths["dir"], exist_ok=True)
+        _copy_media_if_needed(in_path, output_paths, overwrite)
+
         if os.path.exists(out_txt) and prepend_existing:
             try:
                 with open(out_txt, "r", encoding="utf-8") as fh:
@@ -734,7 +791,12 @@ def _process_one_target(fn:str, params:dict):
             with open(out_txt, "w", encoding="utf-8") as fh:
                 fh.write(caption.strip())
 
-        return {"file": fn, "ok": True, "out": os.path.basename(out_txt)}
+        return {
+            "file": fn,
+            "ok": True,
+            "out": os.path.relpath(out_txt, folder),
+            "media_out": os.path.relpath(output_paths["media"], folder) if output_paths.get("needs_media_copy") else None,
+        }
     except VisionAPIRequestError as e:
         out = {"file": fn, "ok": False, "error": str(e), "server_error": True}
         if e.status_code is not None:
@@ -879,6 +941,12 @@ def batch_start():
     overwrite = bool(data.get("overwrite", False))
     prepend_existing = bool(data.get("prepend_existing", False))
     use_existing = bool(data.get("use_existing_caption", False))
+    filename_affix_text = _safe_filename_fragment(data.get("filename_affix_text", ""))
+    filename_affix_position = str(data.get("filename_affix_position") or "prefix").lower()
+    if filename_affix_position not in ("prefix", "suffix"):
+        filename_affix_position = "prefix"
+    output_to_subdir = bool(data.get("output_to_subdir", False))
+    output_subdir_name = _safe_subdir_name(data.get("output_subdir_name", ""))
     max_image_side = _clamp_int(data.get("max_image_side", DEFAULT_MAX_IMAGE_SIDE), DEFAULT_MAX_IMAGE_SIDE, 0, 8192)
     max_output_tokens = _clamp_int(data.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS), DEFAULT_MAX_OUTPUT_TOKENS, 0, 8192)
     max_concurrent = _clamp_int(data.get("max_concurrent", DEFAULT_BATCH_CONCURRENCY), DEFAULT_BATCH_CONCURRENCY, 1, MAX_BATCH_CONCURRENCY)
@@ -898,6 +966,10 @@ def batch_start():
         "overwrite": overwrite,
         "prepend_existing": prepend_existing,
         "use_existing_caption": use_existing,
+        "filename_affix_text": filename_affix_text,
+        "filename_affix_position": filename_affix_position,
+        "output_to_subdir": output_to_subdir,
+        "output_subdir_name": output_subdir_name,
         "max_image_side": max_image_side,
         "max_output_tokens": max_output_tokens,
         "max_concurrent": max_concurrent,
@@ -927,7 +999,17 @@ def batch_start():
     t.start()
 
     total_guess = len(_select_targets(folder, image_mode))
-    return jsonify({"job_id": job_id, "total": total_guess, "max_concurrent": max_concurrent, "max_image_side": max_image_side, "max_output_tokens": max_output_tokens})
+    return jsonify({
+        "job_id": job_id,
+        "total": total_guess,
+        "max_concurrent": max_concurrent,
+        "max_image_side": max_image_side,
+        "max_output_tokens": max_output_tokens,
+        "output_to_subdir": output_to_subdir,
+        "output_subdir_name": output_subdir_name,
+        "filename_affix_text": filename_affix_text,
+        "filename_affix_position": filename_affix_position,
+    })
 
 @app.route("/api/batch-progress", methods=["GET"])
 def batch_progress():
