@@ -7,10 +7,11 @@ import uuid
 import threading
 import queue
 import random
+import re
 from flask import Flask, render_template, request, jsonify
 import requests
-import cv2
 from PIL import Image
+from presets import CAPTION_PRESETS, DEFAULT_IMAGE_SYSTEM_PROMPT, DEFAULT_VIDEO_SYSTEM_PROMPT
 
 # ------------------ Config ------------------
 def _env_first(*names, default=None):
@@ -82,6 +83,7 @@ API_RETRY_BACKOFF_SEC = float(_env_first("CAPTION_RETRY_BACKOFF_SEC", "LLAMA_CPP
 API_ABORT_AFTER_SERVER_ERRORS = int(_env_first("CAPTION_ABORT_AFTER_SERVER_ERRORS", "LLAMA_CPP_ABORT_AFTER_SERVER_ERRORS", "LAMMA_CPP_ABORT_AFTER_SERVER_ERRORS", "LMSTUDIO_ABORT_AFTER_SERVER_ERRORS", default="3"))
 DEFAULT_MAX_IMAGE_SIDE = int(_env_first("CAPTION_MAX_IMAGE_SIDE", "LLAMA_CPP_MAX_IMAGE_SIDE", "LAMMA_CPP_MAX_IMAGE_SIDE", "LMSTUDIO_MAX_IMAGE_SIDE", default="1024"))
 DEFAULT_MAX_OUTPUT_TOKENS = int(_env_first("CAPTION_MAX_OUTPUT_TOKENS", "LLAMA_CPP_MAX_OUTPUT_TOKENS", "LAMMA_CPP_MAX_OUTPUT_TOKENS", "LMSTUDIO_MAX_OUTPUT_TOKENS", default="512"))
+USER_PRESETS_PATH = _env_first("CAPTION_USER_PRESETS_PATH", default="user_presets.json")
 BACKEND_DISPLAY_NAME = BACKEND_DISPLAY_NAMES.get(BACKEND, BACKEND_DISPLAY_NAMES["openai"])
 
 # Backwards-compatible names used by older code paths and third-party snippets.
@@ -94,22 +96,229 @@ ALLOWED_EXTS = {".mp4", ".mov", ".avi", ".webm", ".mkv", ".m4v"}
 ALLOWED_IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
 
 # Default prompts (the UI may send its own, but when modes switch we ensure sane defaults)
-DEFAULT_PROMPT_VIDEO = (
-    "You caption short videos for dataset creation. Only return the caption (no prelude, no quotes). "
-    "Be concrete, specific, and neutral. If multiple actions occur, summarize succinctly. Include descriptions of motions implied between frames. "
-    "Include information about watermarks and text if visible, and the quality/resolution if notable. "
-)
-
-DEFAULT_PROMPT_IMAGE = (
-    "You caption single still images for dataset creation. Only return the caption (no prelude, no quotes). "
-    "Be concrete, specific, and neutral. Focus on visible subjects, actions/poses, setting, composition, "
-    "and salient attributes. Include information about watermarks and text if visible, and the quality/resolution if notable."
-)
+DEFAULT_PROMPT_VIDEO = DEFAULT_VIDEO_SYSTEM_PROMPT
+DEFAULT_PROMPT_IMAGE = DEFAULT_IMAGE_SYSTEM_PROMPT
 
 # Serve everything from project root for simplicity
 app = Flask(__name__, template_folder=".", static_folder=".", static_url_path="/static")
 
 # ------------------ Helpers ------------------
+
+
+
+def _copy_builtin_presets():
+    presets = []
+    for preset in CAPTION_PRESETS:
+        item = dict(preset)
+        item["source"] = "builtin"
+        item["readonly"] = True
+        presets.append(item)
+    return presets
+
+
+def _user_presets_file_path()->str:
+    path = os.path.expanduser(USER_PRESETS_PATH)
+    if not os.path.isabs(path):
+        path = os.path.join(app.root_path, path)
+    return path
+
+
+def _slugify_preset_id(name:str)->str:
+    slug = re.sub(r"[^a-z0-9]+", "-", (name or "preset").strip().lower()).strip("-")
+    return slug or "preset"
+
+
+def _coerce_user_preset(raw:dict)->dict:
+    if not isinstance(raw, dict):
+        raise ValueError("Preset must be an object")
+    name = str(raw.get("name") or "").strip()
+    if not name:
+        raise ValueError("Preset name is required")
+    system_prompt = str(raw.get("system_prompt") or "").strip()
+    user_template = str(raw.get("user_template") or "").strip()
+    if not system_prompt:
+        raise ValueError("System prompt is required")
+    if not user_template:
+        raise ValueError("User message template is required")
+
+    requested_id = str(raw.get("id") or "").strip()
+    if requested_id.startswith("user:"):
+        base_id = requested_id.split(":", 1)[1]
+    else:
+        base_id = requested_id or _slugify_preset_id(name)
+    base_id = _slugify_preset_id(base_id)
+    preset_id = f"user:{base_id}"
+
+
+    media = str(raw.get("media") or "image").strip().lower()
+    if media not in {"image", "video"}:
+        media = "image"
+
+    try:
+        max_output_tokens = int(raw.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS))
+    except (TypeError, ValueError):
+        max_output_tokens = DEFAULT_MAX_OUTPUT_TOKENS
+    max_output_tokens = max(0, min(8192, max_output_tokens))
+
+    return {
+        "id": preset_id,
+        "name": name,
+        "description": str(raw.get("description") or "User-saved preset.").strip(),
+        "media": media,
+        "system_prompt": system_prompt,
+        "user_template": user_template,
+        "prefill": str(raw.get("prefill") or ""),
+        "max_output_tokens": max_output_tokens,
+        "source": "user",
+        "readonly": False,
+    }
+
+
+def load_user_presets()->list:
+    path = _user_presets_file_path()
+    if not os.path.exists(path):
+        return []
+    with open(path, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    if not isinstance(data, list):
+        raise ValueError("User presets file must contain a JSON list")
+    presets = []
+    seen = {p.get("id") for p in _copy_builtin_presets()}
+    for raw in data:
+        preset = _coerce_user_preset(raw)
+        if preset["id"] in seen:
+            preset["id"] = f"user:{_slugify_preset_id(preset['name'])}-{uuid.uuid4().hex[:8]}"
+        seen.add(preset["id"])
+        presets.append(preset)
+    return presets
+
+
+def save_user_presets(presets:list)->None:
+    path = _user_presets_file_path()
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    cleaned = [_coerce_user_preset(preset) for preset in presets]
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as fh:
+        json.dump(cleaned, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+    os.replace(tmp_path, path)
+
+
+def all_caption_presets()->list:
+    return _copy_builtin_presets() + load_user_presets()
+
+def _preset_by_id(preset_id:str):
+    preset_id = (preset_id or "").strip()
+    for preset in CAPTION_PRESETS:
+        if preset.get("id") == preset_id:
+            return preset
+    return None
+
+
+def _default_user_template(image_mode:bool, use_existing:bool=False)->str:
+    preferred = "image_grounded_tags" if image_mode and use_existing else "image_basic" if image_mode else "video_grounded" if use_existing else "video_basic"
+    preset = _preset_by_id(preferred)
+    if preset:
+        return preset.get("user_template", "")
+    return "[image]\n\nCaption this image." if image_mode else "[image]\n\nCaption this clip."
+
+
+def _parse_grouped_metadata(text:str)->dict:
+    groups = {
+        "character_tags": "",
+        "copyright_tags": "",
+        "artist_tags": "",
+        "general_tags": "",
+        "rating_tags": "",
+        "quality_tags": "",
+    }
+    labels = {
+        "CHARACTER": "character_tags",
+        "CHARACTERS": "character_tags",
+        "COPYRIGHT": "copyright_tags",
+        "SERIES": "copyright_tags",
+        "ARTIST": "artist_tags",
+        "STYLE": "artist_tags",
+        "GENERAL": "general_tags",
+        "TAGS": "general_tags",
+        "RATING": "rating_tags",
+        "QUALITY": "quality_tags",
+    }
+    leftovers = []
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        label, sep, value = stripped.partition(":")
+        key = labels.get(label.strip().upper()) if sep else None
+        if key:
+            groups[key] = (groups[key] + ", " + value.strip()).strip(", ") if groups[key] else value.strip()
+        else:
+            leftovers.append(line)
+    groups["ungrouped_caption"] = "\n".join(leftovers).strip()
+    return groups
+
+
+def _context_from_request_values(values:dict, existing_caption:str="", image_mode:bool=False, input_count:int=1)->dict:
+    parsed = _parse_grouped_metadata(existing_caption)
+    context = {
+        "media_kind": "image" if image_mode else "clip",
+        "input_count": str(input_count),
+        "visual_input_description": "one still image" if image_mode else f"{input_count} sampled video frame{'s' if input_count != 1 else ''}",
+        "existing_caption": parsed.get("ungrouped_caption") or (existing_caption or "").strip(),
+        "source_tags": (values.get("source_tags") or "").strip(),
+        "character_tags": (values.get("character_tags") or parsed.get("character_tags") or "").strip(),
+        "copyright_tags": (values.get("copyright_tags") or parsed.get("copyright_tags") or "").strip(),
+        "artist_tags": (values.get("artist_tags") or parsed.get("artist_tags") or "").strip(),
+        "general_tags": (values.get("general_tags") or parsed.get("general_tags") or "").strip(),
+        "rating_tags": (values.get("rating_tags") or parsed.get("rating_tags") or "").strip(),
+        "quality_tags": (values.get("quality_tags") or parsed.get("quality_tags") or "").strip(),
+    }
+    if not context["source_tags"]:
+        source_parts = [context[k] for k in ("character_tags", "copyright_tags", "artist_tags", "general_tags", "rating_tags", "quality_tags") if context[k]]
+        context["source_tags"] = ", ".join(source_parts)
+    return context
+
+
+def _render_user_template(template:str, context:dict)->str:
+    template = (template or "").strip() or "[image]\n\nCaption this visual input."
+    safe_context = {k: str(v or "") for k, v in context.items()}
+    rendered_lines = []
+    for line in template.splitlines():
+        placeholders = [name for name in safe_context if "{" + name + "}" in line]
+        try:
+            rendered = line.format(**safe_context)
+        except KeyError:
+            rendered = line
+        # Optional metadata lines disappear when all placeholders on that line are empty.
+        if placeholders and not any(safe_context[name] for name in placeholders):
+            continue
+        rendered_lines.append(rendered.rstrip())
+    rendered = "\n".join(rendered_lines).strip()
+    while "\n\n\n" in rendered:
+        rendered = rendered.replace("\n\n\n", "\n\n")
+    return rendered
+
+
+def _build_user_content(user_prompt:str, images_data_urls):
+    parts = []
+    prompt = (user_prompt or "").strip()
+    marker = "[image]"
+    if marker in prompt:
+        before, after = prompt.split(marker, 1)
+        if before.strip():
+            parts.append({"type":"text", "text": before.strip()})
+        for url in images_data_urls:
+            parts.append({"type":"image_url", "image_url":{"url": url}})
+        if after.strip():
+            parts.append({"type":"text", "text": after.strip()})
+    else:
+        if prompt:
+            parts.append({"type":"text", "text": prompt})
+        for url in images_data_urls:
+            parts.append({"type":"image_url", "image_url":{"url": url}})
+    return parts
+
 def allowed_video(path:str)->bool:
     return os.path.splitext(path)[1].lower() in ALLOWED_EXTS
 
@@ -151,6 +360,8 @@ def _resize_image_for_vision(im:Image.Image, max_side:int=DEFAULT_MAX_IMAGE_SIDE
 
 
 def extract_frames(video_path:str, num_frames:int, sampling:str, max_image_side:int=DEFAULT_MAX_IMAGE_SIDE):
+    import cv2
+
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise RuntimeError(f"Failed to open video: {video_path}")
@@ -237,19 +448,16 @@ def _is_retryable_api_status(status_code:int)->bool:
     return status_code in {400, 408, 409, 425, 429, 500, 502, 503, 504}
 
 
-def call_vision_api(images_data_urls, system_prompt:str, model:str, prefill:str="", media_kind:str="clip", max_output_tokens:int=DEFAULT_MAX_OUTPUT_TOKENS):
-    if media_kind == "image":
-        lead_text = "You are given a single still image. Write a descriptive caption."
-    else:
-        lead_text = "You are given a few frames sampled from a short video clip. Write a descriptive caption for the clip as a whole."
-
-    user_content = [{"type":"text","text": lead_text}]
-    for url in images_data_urls:
-        user_content.append({"type":"image_url","image_url":{"url": url}})
+def call_vision_api(images_data_urls, system_prompt:str, model:str, prefill:str="", media_kind:str="clip", max_output_tokens:int=DEFAULT_MAX_OUTPUT_TOKENS, user_prompt:str=""):
+    if not user_prompt:
+        if media_kind == "image":
+            user_prompt = "You are given a single still image. Write a descriptive caption.\n\n[image]"
+        else:
+            user_prompt = "You are given a few frames sampled from a short video clip. Write a descriptive caption for the clip as a whole.\n\n[image]"
 
     messages = [
         {"role":"system","content": (system_prompt or "").strip()},
-        {"role":"user","content": user_content}
+        {"role":"user","content": _build_user_content(user_prompt, images_data_urls)}
     ]
 
     payload = {
@@ -323,7 +531,56 @@ def api_config():
         "abort_after_server_errors": API_ABORT_AFTER_SERVER_ERRORS,
         "max_image_side": DEFAULT_MAX_IMAGE_SIDE,
         "max_output_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
+        "caption_presets": all_caption_presets(),
     })
+
+
+@app.route("/api/user-presets", methods=["POST"])
+def api_save_user_preset():
+    data = request.get_json(force=True) or {}
+    user_presets = load_user_presets()
+    existing_user_ids = {preset["id"] for preset in user_presets}
+    builtin_ids = {preset["id"] for preset in _copy_builtin_presets()}
+    requested_id = str(data.get("id") or "").strip()
+
+    if requested_id and requested_id in builtin_ids:
+        return jsonify({"error":"Built-in presets cannot be overwritten. Save as a new user preset instead."}), 400
+
+    try:
+        preset = _coerce_user_preset(data)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    if preset["id"] in builtin_ids:
+        preset["id"] = f"user:{_slugify_preset_id(preset['name'])}"
+
+    if requested_id and preset["id"] in existing_user_ids:
+        user_presets = [preset if existing["id"] == preset["id"] else existing for existing in user_presets]
+    else:
+        all_ids = builtin_ids | existing_user_ids
+        if preset["id"] in all_ids:
+            base_id = preset["id"]
+            n = 2
+            while preset["id"] in all_ids:
+                preset["id"] = f"{base_id}-{n}"
+                n += 1
+        user_presets.append(preset)
+
+    save_user_presets(user_presets)
+    return jsonify({"ok": True, "preset": preset, "caption_presets": all_caption_presets()})
+
+
+@app.route("/api/user-presets/<path:preset_id>", methods=["DELETE"])
+def api_delete_user_preset(preset_id):
+    preset_id = (preset_id or "").strip()
+    if not preset_id.startswith("user:"):
+        return jsonify({"error":"Only user presets can be deleted."}), 400
+    user_presets = load_user_presets()
+    kept = [preset for preset in user_presets if preset.get("id") != preset_id]
+    if len(kept) == len(user_presets):
+        return jsonify({"error":"Unknown user preset."}), 404
+    save_user_presets(kept)
+    return jsonify({"ok": True, "caption_presets": all_caption_presets()})
 
 @app.route("/api/chat-caption", methods=["POST"])
 def chat_caption():
@@ -338,6 +595,16 @@ def chat_caption():
     elif image_mode and system_prompt_in == DEFAULT_PROMPT_VIDEO:
         system_prompt_in = DEFAULT_PROMPT_IMAGE
 
+    user_template = request.form.get("user_template", "").strip() or _default_user_template(image_mode)
+    metadata_values = {
+        "source_tags": request.form.get("source_tags", ""),
+        "character_tags": request.form.get("character_tags", ""),
+        "copyright_tags": request.form.get("copyright_tags", ""),
+        "artist_tags": request.form.get("artist_tags", ""),
+        "general_tags": request.form.get("general_tags", ""),
+        "rating_tags": request.form.get("rating_tags", ""),
+        "quality_tags": request.form.get("quality_tags", ""),
+    }
     model = request.form.get("model", DEFAULT_MODEL)
     prefill = request.form.get("prefill","")
     max_image_side = _clamp_int(request.form.get("max_image_side", DEFAULT_MAX_IMAGE_SIDE), DEFAULT_MAX_IMAGE_SIDE, 0, 8192)
@@ -346,8 +613,6 @@ def chat_caption():
     existing_caption_text = request.form.get("existing_caption","")
 
     media_kind = "image" if image_mode else "clip"
-    if use_existing and existing_caption_text.strip():
-        system_prompt_in = augment_system_with_existing(system_prompt_in, existing_caption_text, media_kind)
 
     tmpdir = "tmp_uploads"
     os.makedirs(tmpdir, exist_ok=True)
@@ -374,7 +639,10 @@ def chat_caption():
         if not imgs:
             raise RuntimeError("No visual inputs found for captioning")
 
-        caption = call_vision_api(imgs, system_prompt_in, model, prefill=prefill, media_kind=media_kind, max_output_tokens=max_output_tokens)
+        existing_for_prompt = existing_caption_text if use_existing else ""
+        context = _context_from_request_values(metadata_values, existing_for_prompt, image_mode=image_mode, input_count=len(imgs))
+        user_prompt = _render_user_template(user_template, context)
+        caption = call_vision_api(imgs, system_prompt_in, model, prefill=prefill, media_kind=media_kind, max_output_tokens=max_output_tokens, user_prompt=user_prompt)
         return jsonify({"caption": caption, "frames_used": len(imgs)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -408,6 +676,8 @@ def _process_one_target(fn:str, params:dict):
     folder = params["target_folder"]
     image_mode = params["image_mode"]
     system_prompt_in = params["system_prompt"]
+    user_template = params.get("user_template") or _default_user_template(image_mode, params.get("use_existing_caption"))
+    metadata_values = params.get("metadata_values", {})
     model = params["model"]
     prefill = params["prefill"]
     num_frames = params["num_frames"]
@@ -429,16 +699,13 @@ def _process_one_target(fn:str, params:dict):
         return {"file": fn, "skipped": True, "reason": "caption exists"}
 
     try:
-        # Optional augmentation with existing caption file.
-        sys_for_this = system_prompt_in
+        old_text = ""
         if use_existing and os.path.exists(out_txt):
             try:
                 with open(out_txt, "r", encoding="utf-8") as fh:
                     old_text = fh.read().strip()
             except Exception:
                 old_text = ""
-            if old_text:
-                sys_for_this = augment_system_with_existing(system_prompt_in, old_text, media_kind)
 
         # Prepare inputs. This happens inside the worker, so multiple files can be prepared
         # and sent to the local vision API at once.
@@ -450,7 +717,9 @@ def _process_one_target(fn:str, params:dict):
         if not imgs:
             raise RuntimeError("No visual inputs found for captioning")
 
-        caption = call_vision_api(imgs, sys_for_this, model, prefill=prefill, media_kind=media_kind, max_output_tokens=max_output_tokens)
+        context = _context_from_request_values(metadata_values, old_text, image_mode=image_mode, input_count=len(imgs))
+        user_prompt = _render_user_template(user_template, context)
+        caption = call_vision_api(imgs, system_prompt_in, model, prefill=prefill, media_kind=media_kind, max_output_tokens=max_output_tokens, user_prompt=user_prompt)
 
         if os.path.exists(out_txt) and prepend_existing:
             try:
@@ -593,6 +862,16 @@ def batch_start():
     system_prompt_in = (data.get("system_prompt","") or "").strip()
     if not system_prompt_in:
         system_prompt_in = DEFAULT_PROMPT_IMAGE if image_mode else DEFAULT_PROMPT_VIDEO
+    user_template = (data.get("user_template", "") or "").strip() or _default_user_template(image_mode, bool(data.get("use_existing_caption", False)))
+    metadata_values = {
+        "source_tags": data.get("source_tags", ""),
+        "character_tags": data.get("character_tags", ""),
+        "copyright_tags": data.get("copyright_tags", ""),
+        "artist_tags": data.get("artist_tags", ""),
+        "general_tags": data.get("general_tags", ""),
+        "rating_tags": data.get("rating_tags", ""),
+        "quality_tags": data.get("quality_tags", ""),
+    }
     model = data.get("model", DEFAULT_MODEL)
     prefill = data.get("prefill","")
     num_frames = int(data.get("num_frames", 5))
@@ -610,6 +889,8 @@ def batch_start():
         "target_folder": folder,
         "image_mode": image_mode,
         "system_prompt": system_prompt_in,
+        "user_template": user_template,
+        "metadata_values": metadata_values,
         "model": model,
         "prefill": prefill,
         "num_frames": num_frames,

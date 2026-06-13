@@ -3,6 +3,11 @@ const sendBtn = document.getElementById('sendBtn');
 const clipInput = document.getElementById('clipInput');
 
 const imageModeToggle = document.getElementById('imageMode');
+const captionPresetSelect = document.getElementById('captionPreset');
+const savePresetBtn = document.getElementById('savePreset');
+const deletePresetBtn = document.getElementById('deletePreset');
+const presetStatus = document.getElementById('presetStatus');
+let captionPresets = [];
 
 function refreshAccept(){
   if (imageModeToggle && imageModeToggle.checked) {
@@ -16,6 +21,153 @@ if (imageModeToggle) {
   refreshAccept();
 }
 
+function getSelectedPreset() {
+  if (!captionPresetSelect) return null;
+  return captionPresets.find(p => p.id === captionPresetSelect.value) || null;
+}
+
+function setPresetStatus(message, isError = false) {
+  if (!presetStatus) return;
+  presetStatus.textContent = message || '';
+  presetStatus.classList.toggle('error', Boolean(isError));
+}
+
+function applyPreset(preset) {
+  if (!preset) return;
+  const systemPrompt = document.getElementById('systemPrompt');
+  const userTemplate = document.getElementById('userTemplate');
+  const prefill = document.getElementById('prefill');
+  const maxOutputTokens = document.getElementById('maxOutputTokens');
+  const presetDescription = document.getElementById('presetDescription');
+
+  if (systemPrompt) systemPrompt.value = preset.system_prompt || '';
+  if (userTemplate) userTemplate.value = preset.user_template || '';
+  if (prefill) prefill.value = preset.prefill || '';
+  if (maxOutputTokens && Number.isFinite(Number(preset.max_output_tokens))) {
+    maxOutputTokens.value = preset.max_output_tokens;
+  }
+  if (presetDescription) {
+    const source = preset.source === 'user' ? 'User preset' : 'Built-in preset';
+    presetDescription.textContent = `${source}: ${preset.description || 'Customize the system prompt and user message template below.'}`;
+  }
+  if (deletePresetBtn) {
+    deletePresetBtn.disabled = preset.source !== 'user' || preset.readonly === true;
+  }
+  setPresetStatus('');
+  if (imageModeToggle && preset.media) {
+    imageModeToggle.checked = preset.media === 'image';
+    refreshAccept();
+  }
+}
+
+function populatePresets(presets) {
+  captionPresets = Array.isArray(presets) ? presets : [];
+  if (!captionPresetSelect) return;
+  captionPresetSelect.innerHTML = '';
+  for (const preset of captionPresets) {
+    const option = document.createElement('option');
+    option.value = preset.id;
+    option.textContent = preset.name || preset.id;
+    captionPresetSelect.appendChild(option);
+  }
+  const initial = captionPresets.find(p => p.id === 'video_basic') || captionPresets[0];
+  if (initial) {
+    captionPresetSelect.value = initial.id;
+    applyPreset(initial);
+  }
+}
+
+if (captionPresetSelect) {
+  captionPresetSelect.addEventListener('change', () => applyPreset(getSelectedPreset()));
+}
+
+function collectPresetPayload(name, id = '') {
+  return {
+    id,
+    name,
+    description: `User-saved preset${name ? `: ${name}` : ''}`,
+    media: imageModeToggle && imageModeToggle.checked ? 'image' : 'video',
+    system_prompt: document.getElementById('systemPrompt').value,
+    user_template: document.getElementById('userTemplate').value,
+    prefill: document.getElementById('prefill').value,
+    max_output_tokens: Number(document.getElementById('maxOutputTokens').value)
+  };
+}
+
+async function saveCurrentPreset() {
+  const selected = getSelectedPreset();
+  const defaultName = selected && selected.source === 'user' ? selected.name : 'My caption preset';
+  const name = window.prompt('Name for this user preset:', defaultName);
+  if (!name || !name.trim()) return;
+  const updateExisting = selected && selected.source === 'user';
+  const payload = collectPresetPayload(name.trim(), updateExisting ? selected.id : '');
+
+  try {
+    setPresetStatus('Saving preset…');
+    const res = await fetch('/api/user-presets', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const out = await res.json();
+    if (!res.ok || out.error) throw new Error(out.error || `HTTP ${res.status}`);
+    populatePresets(out.caption_presets || []);
+    if (out.preset && captionPresetSelect) {
+      captionPresetSelect.value = out.preset.id;
+      applyPreset(getSelectedPreset());
+    }
+    setPresetStatus('Saved user preset.');
+  } catch (e) {
+    setPresetStatus(`Save failed: ${e.message || e}`, true);
+  }
+}
+
+async function deleteCurrentPreset() {
+  const selected = getSelectedPreset();
+  if (!selected || selected.source !== 'user') return;
+  if (!window.confirm(`Delete user preset "${selected.name}"?`)) return;
+  try {
+    setPresetStatus('Deleting preset…');
+    const res = await fetch(`/api/user-presets/${encodeURIComponent(selected.id)}`, { method: 'DELETE' });
+    const out = await res.json();
+    if (!res.ok || out.error) throw new Error(out.error || `HTTP ${res.status}`);
+    populatePresets(out.caption_presets || []);
+    setPresetStatus('Deleted user preset.');
+  } catch (e) {
+    setPresetStatus(`Delete failed: ${e.message || e}`, true);
+  }
+}
+
+if (savePresetBtn) {
+  savePresetBtn.addEventListener('click', saveCurrentPreset);
+}
+if (deletePresetBtn) {
+  deletePresetBtn.addEventListener('click', deleteCurrentPreset);
+}
+
+function appendMetadataFields(target) {
+  target.append('user_template', document.getElementById('userTemplate').value);
+  target.append('source_tags', document.getElementById('sourceTags').value);
+  target.append('character_tags', document.getElementById('characterTags').value);
+  target.append('copyright_tags', document.getElementById('copyrightTags').value);
+  target.append('artist_tags', document.getElementById('artistTags').value);
+  target.append('general_tags', document.getElementById('generalTags').value);
+  target.append('rating_tags', document.getElementById('ratingTags').value);
+  target.append('quality_tags', document.getElementById('qualityTags').value);
+}
+
+function readMetadataFields() {
+  return {
+    user_template: document.getElementById('userTemplate').value,
+    source_tags: document.getElementById('sourceTags').value,
+    character_tags: document.getElementById('characterTags').value,
+    copyright_tags: document.getElementById('copyrightTags').value,
+    artist_tags: document.getElementById('artistTags').value,
+    general_tags: document.getElementById('generalTags').value,
+    rating_tags: document.getElementById('ratingTags').value,
+    quality_tags: document.getElementById('qualityTags').value
+  };
+}
 
 async function loadBackendConfig() {
   try {
@@ -41,6 +193,8 @@ async function loadBackendConfig() {
     if (maxOutputTokens && Number.isFinite(Number(cfg.max_output_tokens))) {
       maxOutputTokens.value = cfg.max_output_tokens;
     }
+
+    populatePresets(cfg.caption_presets);
 
     const maxConcurrent = document.getElementById('maxConcurrent');
     if (maxConcurrent && Number.isFinite(Number(cfg.default_batch_concurrency))) {
@@ -81,6 +235,7 @@ async function postChatCaption(file) {
   fd.append('max_output_tokens', document.getElementById('maxOutputTokens').value);
   fd.append('use_existing_caption', document.getElementById('useExistingCaption').checked);
   fd.append('existing_caption', document.getElementById('existingCaption').value);
+  appendMetadataFields(fd);
   fd.append('image_mode', imageModeToggle && imageModeToggle.checked);
 
   const res = await fetch('/api/chat-caption', { method:'POST', body: fd });
@@ -169,7 +324,8 @@ function getBatchBody() {
     overwrite: document.getElementById('overwrite').checked,
     prepend_existing: document.getElementById('prependExisting').checked,
     use_existing_caption: document.getElementById('useExistingCaption').checked,
-    image_mode: imageModeToggle && imageModeToggle.checked
+    image_mode: imageModeToggle && imageModeToggle.checked,
+    ...readMetadataFields()
   };
 }
 

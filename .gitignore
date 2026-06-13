@@ -17,6 +17,8 @@ tmp_uploads/
 # Local config/secrets
 .env
 .env.*
+user_presets.json
+user_presets.json.tmp
 
 # Generated captions / local datasets
 *.txt
