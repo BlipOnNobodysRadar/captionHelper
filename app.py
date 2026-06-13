@@ -565,16 +565,27 @@ def call_vision_api(images_data_urls, system_prompt:str, model:str, prefill:str=
         else:
             if r.ok:
                 data = r.json()
-                return data["choices"][0]["message"]["content"].strip()
+                content = data["choices"][0]["message"].get("content")
+                caption = (content or "").strip()
+                if caption:
+                    return caption
 
-            detail = _api_error_detail(r)
-            msg = f"{BACKEND_DISPLAY_NAME} HTTP {r.status_code}: {detail}"
-            last_error = VisionAPIRequestError(r.status_code, msg, detail)
-            detail_lower = detail.lower()
-            if "context size" in detail_lower or "context length" in detail_lower or "context window" in detail_lower:
-                retryable = False
+                body = json.dumps(data, ensure_ascii=False)
+                last_error = VisionAPIRequestError(
+                    None,
+                    "Backend returned an empty caption; refusing to write blank .txt",
+                    body,
+                )
+                retryable = True
             else:
-                retryable = _is_retryable_api_status(r.status_code)
+                detail = _api_error_detail(r)
+                msg = f"{BACKEND_DISPLAY_NAME} HTTP {r.status_code}: {detail}"
+                last_error = VisionAPIRequestError(r.status_code, msg, detail)
+                detail_lower = detail.lower()
+                if "context size" in detail_lower or "context length" in detail_lower or "context window" in detail_lower:
+                    retryable = False
+                else:
+                    retryable = _is_retryable_api_status(r.status_code)
 
         if attempt < attempts and retryable:
             # Jitter avoids every worker retrying at the exact same moment.
@@ -784,6 +795,30 @@ def _copy_media_if_needed(source_path:str, output_paths:dict, overwrite:bool):
         return
     shutil.copy2(source_path, dest_path)
 
+def _write_caption_error_debug_file(output_paths:dict, error:VisionAPIRequestError):
+    raw_body = (error.body or "").strip()
+    if not raw_body:
+        return None
+
+    out_txt = output_paths["caption"]
+    debug_path = os.path.splitext(out_txt)[0] + ".caption_error.json"
+    os.makedirs(os.path.dirname(debug_path) or ".", exist_ok=True)
+
+    debug_payload = {
+        "error": str(error),
+        "status_code": error.status_code,
+    }
+    try:
+        debug_payload["raw_response"] = json.loads(raw_body)
+    except json.JSONDecodeError:
+        debug_payload["raw_response"] = raw_body
+
+    with open(debug_path, "w", encoding="utf-8") as fh:
+        json.dump(debug_payload, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+    return debug_path
+
+
 def _select_targets(folder:str, image_mode:bool):
     if image_mode:
         selected = [p for p in os.listdir(folder) if allowed_image(os.path.join(folder, p))]
@@ -877,6 +912,9 @@ def _process_one_target(fn:str, params:dict):
         }
     except VisionAPIRequestError as e:
         out = {"file": fn, "ok": False, "error": str(e), "server_error": True}
+        debug_path = _write_caption_error_debug_file(output_paths, e)
+        if debug_path:
+            out["debug_out"] = os.path.relpath(debug_path, folder)
         if e.status_code is not None:
             out["status_code"] = e.status_code
         return out
