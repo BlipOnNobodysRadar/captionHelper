@@ -130,12 +130,21 @@ For parallel batch captioning, LM Studio's **Max Concurrent Predictions** should
 4. Choose parallel workers.
 5. Start the batch.
 
-The app writes captions as `.txt` files beside the original media:
+The app writes captions as `.txt` files beside the original media by default:
 
 ```text
 image001.jpg  -> image001.txt
 clip001.mp4   -> clip001.txt
 ```
+
+Batch output options can also copy the media and caption outputs with custom filename text prepended or appended. Include any desired separator in the custom text:
+
+```text
+image001.jpg + prefix "ideogramConversion_" -> ideogramConversion_image001.jpg
+                                                ideogramConversion_image001.txt
+```
+
+Enable **Copy results to target subdirectory** to write the copied media and generated captions inside a subdirectory of the target folder instead of beside the originals.
 
 By default, generated `.txt` files are ignored by git so local datasets do not get committed accidentally.
 

@@ -323,6 +323,10 @@ function getBatchBody() {
     sampling_type: document.getElementById('samplingType').value,
     overwrite: document.getElementById('overwrite').checked,
     prepend_existing: document.getElementById('prependExisting').checked,
+    filename_affix_text: document.getElementById('filenameAffixText').value,
+    filename_affix_position: document.getElementById('filenameAffixPosition').value,
+    output_to_subdir: document.getElementById('outputToSubdir').checked,
+    output_subdir_name: document.getElementById('outputSubdirName').value,
     use_existing_caption: document.getElementById('useExistingCaption').checked,
     image_mode: imageModeToggle && imageModeToggle.checked,
     ...readMetadataFields()
@@ -365,7 +369,10 @@ async function pollProgress() {
       for (let i = lastResultCount; i < out.results.length; i++) {
         const r = out.results[i];
         const took = r.duration_sec !== undefined ? ` [${formatDuration(r.duration_sec)}]` : '';
-        if (r.ok) logBatch(`✓ ${r.file} -> ${r.out}${took}`);
+        if (r.ok) {
+          const mediaOut = r.media_out ? ` + ${r.media_out}` : '';
+          logBatch(`✓ ${r.file} -> ${r.out}${mediaOut}${took}`);
+        }
         else if (r.skipped) logBatch(`↷ ${r.file} (skipped: ${r.reason})${took}`);
         else {
           const code = r.status_code ? ` [HTTP ${r.status_code}]` : '';

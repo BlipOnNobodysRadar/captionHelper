@@ -159,6 +159,25 @@
         <div class="row">
           <label><input type="checkbox" id="prependExisting"> Prepend to existing captions file?</label>
         </div>
+        <div class="row two-col">
+          <div>
+            <label>Filename custom text:</label>
+            <input id="filenameAffixText" placeholder="ideogramConversion_">
+          </div>
+          <div>
+            <label>Text position:</label>
+            <select id="filenameAffixPosition">
+              <option value="prefix" selected>prepend</option>
+              <option value="suffix">append</option>
+            </select>
+          </div>
+          <small style="color:#8a90a6; grid-column:1 / -1;">Optional. Applies to generated caption filenames and copied media filenames; include any desired separator in the text.</small>
+        </div>
+        <div class="row">
+          <label><input type="checkbox" id="outputToSubdir"> Copy results to target subdirectory</label>
+          <input id="outputSubdirName" placeholder="captionHelper_results">
+          <small style="color:#8a90a6">When enabled, copied media and generated captions are written inside this subdirectory of the target folder.</small>
+        </div>
         <div class="row">
           <label><input type="checkbox" id="notifyDone" checked> Notify when done</label>
         </div>
