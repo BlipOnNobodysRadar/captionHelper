@@ -48,7 +48,7 @@ body {
 }
 .card h3 { margin: 0 0 8px; color: var(--muted); font-size: 16px; }
 .card .row { display: grid; gap: 6px; margin-bottom: 10px; }
-.card input[type="text"], .card input[type="number"], .card textarea, .card select {
+.card input, .card textarea, .card select {
   width: 100%; padding: 8px; border-radius: 6px; border: 1px solid var(--border); background: #0d0f16; color: #d7d9e0;
 }
 small { font-size: 11px; }
@@ -86,4 +86,45 @@ html, body { min-width: 0; overflow-x: hidden; }
   font-size: 12px;
   margin: -6px 0 12px;
   overflow-wrap: anywhere;
+}
+.metadata-details {
+  border-top: 1px solid var(--border);
+  margin: 8px 0 10px;
+  padding-top: 8px;
+}
+.metadata-details summary {
+  color: var(--muted);
+  cursor: pointer;
+  margin-bottom: 8px;
+}
+.two-col {
+  grid-template-columns: 1fr 1fr;
+}
+.two-col > div {
+  display: grid;
+  gap: 6px;
+}
+.preset-actions {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: 1fr 1fr;
+}
+.preset-actions button {
+  background: #1b2131;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  cursor: pointer;
+  padding: 8px;
+}
+.preset-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.preset-status {
+  color: var(--muted);
+  min-height: 1em;
+}
+.preset-status.error {
+  color: #ff8c8c;
 }

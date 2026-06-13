@@ -139,11 +139,46 @@ clip001.mp4   -> clip001.txt
 
 By default, generated `.txt` files are ignored by git so local datasets do not get committed accidentally.
 
+## Presets and prompt templates
+
+captionHelper includes a **Preset** selector for common caption-conversion workflows:
+
+- basic image captioning;
+- detailed image captioning;
+- grounded image/tag conversion;
+- basic video captioning;
+- grounded video caption conversion;
+- Ideogram 4 image-to-JSON captioning.
+
+Selecting a preset fills both editable prompt fields:
+
+- **System prompt** controls the static model behavior.
+- **User message template** controls the per-request message sent with the image or video frames. Use `[image]` where visual inputs should be inserted.
+
+After editing a preset, use **Save as user preset** to store it in `user_presets.json`. This file is ignored by git so local prompt experiments, private templates, and dataset-specific presets are not committed. Set `CAPTION_USER_PRESETS_PATH=/path/to/presets.json` if you want to keep the file elsewhere. User presets can be selected like built-in presets and deleted from the UI.
+
+The template can use these placeholders, and lines containing only empty placeholders are omitted automatically:
+
+```text
+{existing_caption}
+{source_tags}
+{character_tags}
+{copyright_tags}
+{artist_tags}
+{general_tags}
+{rating_tags}
+{quality_tags}
+{media_kind}
+{input_count}
+```
+
+The optional tag-group fields are shared by chat and batch requests. For batch jobs, per-file `.txt` captions can also contain grouped lines such as `CHARACTER: ...`, `COPYRIGHT: ...`, `ARTIST: ...`, `GENERAL: ...`, `RATING: ...`, and `QUALITY: ...`; captionHelper maps those into matching template placeholders.
+
 ## Existing-caption grounding
 
-If **Use existing caption** is enabled during batch mode, the app looks for a matching `.txt` file next to each image/video and adds that text to the prompt as grounding.
+If **Use existing caption** is enabled during batch mode, the app looks for a matching `.txt` file next to each image/video and passes that text through the active user message template as grounding.
 
-This is useful for converting booru tags, rough captions, or older captions into more detailed natural-language captions.
+This is useful for converting booru tags, rough captions, or older captions into more detailed natural-language captions or structured preset outputs.
 
 ## Parallel/context guidance
 
@@ -188,6 +223,7 @@ Available variables:
 | `CAPTION_ABORT_AFTER_SERVER_ERRORS` | `3` | Abort batch after this many API-level errors. Set `0` to disable. |
 | `CAPTION_MAX_IMAGE_SIDE` | `1024` | Default max image dimension before sending to the backend. Set `0` to disable resizing. |
 | `CAPTION_MAX_OUTPUT_TOKENS` | `512` | Default generation limit for captions. |
+| `CAPTION_USER_PRESETS_PATH` | `user_presets.json` | Local JSON file for UI-saved user presets. Relative paths are resolved from the app directory; the default file is git-ignored. |
 
 Backwards-compatible `LMSTUDIO_*` variables still work. New `LLAMA_CPP_*` aliases are also accepted, for example `LLAMA_CPP_BASE_URL` and `LLAMA_CPP_MODEL`. `LAMMA_CPP_*` is accepted as a typo-tolerant alias.
 

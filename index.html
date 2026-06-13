@@ -25,8 +25,26 @@
 
     <aside class="side">
       <section class="card">
-        <h3>system prompt</h3>
-        <textarea id="systemPrompt" rows="6">You caption short videos for dataset creation. Only return the caption (no prelude, no quotes). Be concrete, specific, and neutral. If multiple actions occur, summarize succinctly.</textarea>
+        <h3>caption preset + prompts</h3>
+        <div class="row">
+          <label>Preset:</label>
+          <select id="captionPreset"></select>
+          <div class="preset-actions">
+            <button type="button" id="savePreset">Save as user preset</button>
+            <button type="button" id="deletePreset" disabled>Delete user preset</button>
+          </div>
+          <small id="presetDescription" style="color:#8a90a6">Choose a preset, then customize either prompt below.</small>
+          <small id="presetStatus" class="preset-status"></small>
+        </div>
+        <div class="row">
+          <label>System prompt:</label>
+          <textarea id="systemPrompt" rows="8">You caption short videos for dataset creation. Only return the caption (no prelude, no quotes). Be concrete, specific, and neutral. If multiple actions occur, summarize succinctly.</textarea>
+        </div>
+        <div class="row">
+          <label>User message template:</label>
+          <textarea id="userTemplate" rows="7" placeholder="Use [image] where image/video frames should be inserted. Available placeholders: {existing_caption}, {source_tags}, {character_tags}, {copyright_tags}, {artist_tags}, {general_tags}, {rating_tags}, {quality_tags}, {media_kind}, {input_count}"></textarea>
+          <small style="color:#8a90a6">Lines with only empty placeholders are omitted, so metadata blocks can be optional.</small>
+        </div>
       </section>
 
       <section class="card">
@@ -86,8 +104,42 @@
 
         <div class="row">
           <label>Existing caption (chat mode):</label>
-          <textarea id="existingCaption" rows="4" placeholder="Paste a booru tag string or previous caption here (optional)"></textarea>
+          <textarea id="existingCaption" rows="4" placeholder="Paste a booru tag string or previous caption here (optional). Batch mode reads basename.txt when enabled."></textarea>
         </div>
+
+        <details class="metadata-details">
+          <summary>Optional source tag groups / metadata</summary>
+          <div class="row">
+            <label>Character tags:</label>
+            <textarea id="characterTags" rows="2" placeholder="character names or tags"></textarea>
+          </div>
+          <div class="row">
+            <label>Copyright / series tags:</label>
+            <textarea id="copyrightTags" rows="2" placeholder="series, franchise, copyright tags"></textarea>
+          </div>
+          <div class="row">
+            <label>Artist / style tags:</label>
+            <textarea id="artistTags" rows="2" placeholder="artist or style tags"></textarea>
+          </div>
+          <div class="row">
+            <label>General tags:</label>
+            <textarea id="generalTags" rows="3" placeholder="general booru tags or metadata"></textarea>
+          </div>
+          <div class="row two-col">
+            <div>
+              <label>Rating tags:</label>
+              <input id="ratingTags" placeholder="safe, explicit, rating:e">
+            </div>
+            <div>
+              <label>Quality tags:</label>
+              <input id="qualityTags" placeholder="score_9, masterpiece">
+            </div>
+          </div>
+          <div class="row">
+            <label>Source tags:</label>
+            <textarea id="sourceTags" rows="3" placeholder="Ungrouped tags or metadata shared by chat and batch"></textarea>
+          </div>
+        </details>
 
         <div class="row">
           <label>Assistant response prefill:</label>
