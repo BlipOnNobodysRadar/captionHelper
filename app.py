@@ -9,8 +9,9 @@ import queue
 import random
 import shutil
 import re
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, abort, jsonify, render_template, request, send_from_directory
 import requests
+from werkzeug.exceptions import RequestEntityTooLarge
 from PIL import Image
 from presets import CAPTION_PRESETS, DEFAULT_IMAGE_SYSTEM_PROMPT, DEFAULT_VIDEO_SYSTEM_PROMPT
 
@@ -85,6 +86,11 @@ API_ABORT_AFTER_SERVER_ERRORS = int(_env_first("CAPTION_ABORT_AFTER_SERVER_ERROR
 DEFAULT_MAX_IMAGE_SIDE = int(_env_first("CAPTION_MAX_IMAGE_SIDE", "LLAMA_CPP_MAX_IMAGE_SIDE", "LAMMA_CPP_MAX_IMAGE_SIDE", "LMSTUDIO_MAX_IMAGE_SIDE", default="1024"))
 DEFAULT_MAX_OUTPUT_TOKENS = int(_env_first("CAPTION_MAX_OUTPUT_TOKENS", "LLAMA_CPP_MAX_OUTPUT_TOKENS", "LAMMA_CPP_MAX_OUTPUT_TOKENS", "LMSTUDIO_MAX_OUTPUT_TOKENS", default="512"))
 USER_PRESETS_PATH = _env_first("CAPTION_USER_PRESETS_PATH", default="user_presets.json")
+APP_HOST = _env_first("CAPTION_HOST", default="127.0.0.1")
+APP_PORT = int(_env_first("CAPTION_PORT", default="5057"))
+APP_DEBUG = str(_env_first("CAPTION_DEBUG", default="false")).strip().lower() in {"1", "true", "yes", "on"}
+MAX_UPLOAD_BYTES = int(_env_first("CAPTION_MAX_UPLOAD_BYTES", default=str(512 * 1024 * 1024)))
+CAPTION_ALLOWED_HOSTS = _env_first("CAPTION_ALLOWED_HOSTS", default="localhost,127.0.0.1,::1")
 BACKEND_DISPLAY_NAME = BACKEND_DISPLAY_NAMES.get(BACKEND, BACKEND_DISPLAY_NAMES["openai"])
 
 # Backwards-compatible names used by older code paths and third-party snippets.
@@ -100,8 +106,73 @@ ALLOWED_IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
 DEFAULT_PROMPT_VIDEO = DEFAULT_VIDEO_SYSTEM_PROMPT
 DEFAULT_PROMPT_IMAGE = DEFAULT_IMAGE_SYSTEM_PROMPT
 
-# Serve everything from project root for simplicity
-app = Flask(__name__, template_folder=".", static_folder=".", static_url_path="/static")
+# Serve the HTML template from the project root, but expose only the
+# browser assets explicitly whitelisted below. Mapping /static to the entire
+# project root would leak source files and local user_presets.json contents.
+app = Flask(__name__, template_folder=".", static_folder=None)
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
+
+_ALLOWED_STATIC_FILES = {"script.js", "style.css"}
+
+
+def _configured_allowed_hosts()->set[str]:
+    raw = str(CAPTION_ALLOWED_HOSTS or "").strip()
+    if raw == "*":
+        return {"*"}
+    hosts = {item.strip().lower() for item in raw.split(",") if item.strip()}
+    return hosts or {"localhost", "127.0.0.1", "::1"}
+
+
+def _hostname_from_host_header(host_header:str|None)->str:
+    host = (host_header or "").strip().lower()
+    if host.startswith("[") and "]" in host:
+        return host[1:host.index("]")]
+    return host.split(":", 1)[0].strip("[]")
+
+
+def _request_host_allowed(hostname:str|None)->bool:
+    allowed = _configured_allowed_hosts()
+    if "*" in allowed:
+        return True
+    host = _hostname_from_host_header(hostname)
+    return host in allowed
+
+
+def _same_origin_allowed(url:str|None)->bool:
+    if not url:
+        return True
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    if not parsed.hostname:
+        return True
+    return _request_host_allowed(parsed.hostname)
+
+
+@app.before_request
+def enforce_local_request_boundaries():
+    if not _request_host_allowed(request.host):
+        abort(403)
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        if not _same_origin_allowed(request.headers.get("Origin")):
+            abort(403)
+        referer = request.headers.get("Referer")
+        if referer and not _same_origin_allowed(referer):
+            abort(403)
+
+
+@app.after_request
+def add_security_headers(response):
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    response.headers.setdefault("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'")
+    return response
+
+
+@app.errorhandler(RequestEntityTooLarge)
+def upload_too_large(_error):
+    max_mb = MAX_UPLOAD_BYTES / (1024 * 1024)
+    return jsonify({"error": f"Uploaded file is too large. Limit is {max_mb:.0f} MB."}), 413
 
 # ------------------ Helpers ------------------
 
@@ -518,6 +589,13 @@ def call_vision_api(images_data_urls, system_prompt:str, model:str, prefill:str=
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+@app.route("/static/<path:filename>")
+def static_assets(filename):
+    if filename not in _ALLOWED_STATIC_FILES:
+        abort(404)
+    return send_from_directory(app.root_path, filename)
 
 
 @app.route("/api/config", methods=["GET"])
@@ -1116,4 +1194,4 @@ def batch_caption_oneshot():
     return jsonify({"error":"Job disappeared"}), 500
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5057, debug=True)
+    app.run(host=APP_HOST, port=APP_PORT, debug=APP_DEBUG)

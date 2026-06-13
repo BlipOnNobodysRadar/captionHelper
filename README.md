@@ -78,6 +78,8 @@ Then open:
 http://localhost:5057/
 ```
 
+By default captionHelper binds only to `127.0.0.1` and runs with Flask debug mode off. Keep it local unless you fully trust the network: the app can read target-folder filenames, read matching caption text, upload images/video frames to the configured vision backend, and write caption files. If you intentionally expose it beyond localhost, set `CAPTION_HOST`, `CAPTION_ALLOWED_HOSTS`, and any firewall/reverse-proxy authentication deliberately.
+
 You do not need to manually activate the venv when using `uv run`.
 
 If you prefer to activate it anyway:
@@ -210,6 +212,18 @@ For image captioning, start at 4 parallel workers. Test 6, 8, or 12 by comparing
 
 Avoid setting **Max image side** to `0` during high-parallel runs unless the source images are already small.
 
+## Security and privacy notes
+
+captionHelper is a local dataset-preparation tool, not a multi-user web service. The web UI accepts uploaded media and target folder paths, and batch jobs expose active/result filenames in progress responses so the UI can show useful status. To reduce accidental leaks:
+
+- The development server defaults to `127.0.0.1` instead of all network interfaces.
+- Flask debug mode is disabled unless `CAPTION_DEBUG=true` is set.
+- Host, Origin, and Referer checks default to localhost hosts to reduce DNS-rebinding and cross-site request risks.
+- `/static` only serves the browser assets required by the UI, instead of exposing the whole repository root.
+- Upload size is capped by `CAPTION_MAX_UPLOAD_BYTES` to reduce accidental denial-of-service from very large chat uploads.
+
+Do not point `CAPTION_API_BASE_URL` at an untrusted remote service unless you are comfortable sending uploaded images/video frames, prompts, existing captions, and tag metadata to that service.
+
 ## Environment variables
 
 You can override defaults with environment variables.
@@ -233,6 +247,11 @@ Available variables:
 | `CAPTION_MAX_IMAGE_SIDE` | `1024` | Default max image dimension before sending to the backend. Set `0` to disable resizing. |
 | `CAPTION_MAX_OUTPUT_TOKENS` | `512` | Default generation limit for captions. |
 | `CAPTION_USER_PRESETS_PATH` | `user_presets.json` | Local JSON file for UI-saved user presets. Relative paths are resolved from the app directory; the default file is git-ignored. |
+| `CAPTION_HOST` | `127.0.0.1` | Host/interface for the Flask development server. Use `0.0.0.0` only on a trusted network with additional access controls. |
+| `CAPTION_PORT` | `5057` | Port for the Flask development server. |
+| `CAPTION_DEBUG` | `false` | Enables Flask debug mode when set to `true`, `1`, `yes`, or `on`. Do not enable on shared networks. |
+| `CAPTION_ALLOWED_HOSTS` | `localhost,127.0.0.1,::1` | Comma-separated hostnames accepted in Host/Origin/Referer checks. Set deliberately if exposing the app under another hostname; `*` disables these checks. |
+| `CAPTION_MAX_UPLOAD_BYTES` | `536870912` | Maximum chat-upload request size in bytes (default 512 MiB). |
 
 Backwards-compatible `LMSTUDIO_*` variables still work. New `LLAMA_CPP_*` aliases are also accepted, for example `LLAMA_CPP_BASE_URL` and `LLAMA_CPP_MODEL`. `LAMMA_CPP_*` is accepted as a typo-tolerant alias.
 
