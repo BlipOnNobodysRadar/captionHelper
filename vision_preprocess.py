@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from dataclasses import dataclass, asdict
 from typing import Any
 
@@ -24,6 +25,20 @@ FALLBACK_VOCABULARY = [
     "vehicle", "building", "window", "text", "logo", "signature", "watermark",
 ]
 META_TAG_RE = re.compile(r"^(score_\d+|rating[:_].+|best_quality|highres|absurdres|masterpiece|safe|questionable|explicit)$", re.I)
+
+
+def write_progress(path: str, *, stage: str, message: str, percent: float | None = None) -> None:
+    if not path:
+        return
+    payload = {"stage": stage, "message": message, "percent": percent, "updated_at": time.time()}
+    tmp_path = f"{path}.tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False)
+            fh.write("\n")
+        os.replace(tmp_path, path)
+    except Exception:
+        pass
 DEFAULT_MODEL_ROOT = os.path.join(os.path.expanduser("~"), ".cache", "captionhelper", "vision_models")
 MODEL_SPECS = {
     "detector": {
@@ -158,6 +173,7 @@ def resolve_model_asset(
     provided_path: str = "",
     model_root: str = DEFAULT_MODEL_ROOT,
     auto_download: bool = True,
+    progress_out: str = "",
 ) -> tuple[dict[str, Any] | None, list[str]]:
     """Resolve or optionally download model assets for a selected preprocessor.
 
@@ -255,6 +271,12 @@ def resolve_model_asset(
 
     os.makedirs(expected_path, exist_ok=True)
     try:
+        write_progress(
+            progress_out,
+            stage="downloading_model",
+            message=f"Downloading {spec['description']} from {spec['repo_id']}...",
+            percent=None,
+        )
         downloaded_path = snapshot_download(
             repo_id=spec["repo_id"],
             local_dir=expected_path,
@@ -272,6 +294,12 @@ def resolve_model_asset(
             "auto_downloaded": False,
         }, warnings
 
+    write_progress(
+        progress_out,
+        stage="model_downloaded",
+        message=f"Downloaded {spec['description']} to {downloaded_path}.",
+        percent=100,
+    )
     return {
         "component": component,
         "selection": selection,
@@ -290,7 +318,7 @@ def _model_load_reference(asset: dict[str, Any]) -> str | None:
     return asset.get("repo_id")
 
 
-def load_selected_model_assets(model_assets: dict[str, Any], *, load_models: bool, auto_download: bool) -> tuple[dict[str, Any], list[str]]:
+def load_selected_model_assets(model_assets: dict[str, Any], *, load_models: bool, auto_download: bool, progress_out: str = "") -> tuple[dict[str, Any], list[str]]:
     """Best-effort warm loading for selected preprocessing models.
 
     Loading is intentionally optional because these dependencies are large. When
@@ -308,6 +336,7 @@ def load_selected_model_assets(model_assets: dict[str, Any], *, load_models: boo
     detector = model_assets.get("detector")
     if detector:
         selection = detector.get("selection")
+        write_progress(progress_out, stage="loading_model", message=f"Loading {selection} preprocessing model...", percent=None)
         ref = _model_load_reference(detector) if auto_download or detector.get("available") else None
         item = {"selection": selection, "loaded": False, "reference": ref}
         if not ref:
@@ -356,6 +385,7 @@ def load_selected_model_assets(model_assets: dict[str, Any], *, load_models: boo
 
     segmenter = model_assets.get("segmenter")
     if segmenter and segmenter.get("selection") == "sam2":
+        write_progress(progress_out, stage="loading_model", message="Loading SAM2 preprocessing model...", percent=None)
         ref = _model_load_reference(segmenter) if auto_download or segmenter.get("available") else None
         item = {"selection": "sam2", "loaded": False, "reference": ref}
         if not ref:
@@ -375,6 +405,7 @@ def load_selected_model_assets(model_assets: dict[str, Any], *, load_models: boo
 
     ocr = model_assets.get("ocr")
     if ocr and ocr.get("selection") == "paddleocr":
+        write_progress(progress_out, stage="loading_model", message="Loading PaddleOCR preprocessing model...", percent=None)
         item = {"selection": "paddleocr", "loaded": False, "reference": ocr.get("path")}
         try:
             from paddleocr import PaddleOCR  # type: ignore
@@ -471,6 +502,7 @@ def main() -> int:
     parser.add_argument("--tags", default="")
     parser.add_argument("--tags-text", default="")
     parser.add_argument("--out", required=True)
+    parser.add_argument("--progress-out", default="")
     parser.add_argument("--detector", default="none", choices=["none", "groundingdino", "groundingdino1.5", "florence2"])
     parser.add_argument("--segmenter", default="none", choices=["none", "sam2"])
     parser.add_argument("--ocr", default="none", choices=["none", "paddleocr"])
@@ -489,6 +521,7 @@ def main() -> int:
 
     with Image.open(args.image) as im:
         width, height = im.size
+    write_progress(args.progress_out, stage="starting", message="Preparing region preprocessing...", percent=0)
     tags_text = args.tags_text
     if args.tags and os.path.exists(args.tags):
         with open(args.tags, "r", encoding="utf-8", errors="replace") as fh:
@@ -510,6 +543,7 @@ def main() -> int:
             provided_path=provided_path,
             model_root=args.model_root,
             auto_download=args.auto_download,
+            progress_out=args.progress_out,
         )
         if asset:
             model_assets[component] = asset
@@ -518,6 +552,7 @@ def main() -> int:
         model_assets,
         load_models=args.load_models,
         auto_download=args.auto_download,
+        progress_out=args.progress_out,
     )
     warnings.extend(load_warnings)
 
@@ -532,6 +567,7 @@ def main() -> int:
         asset_note = f" Resolved model path: {segmenter_asset.get('path')}." if segmenter_asset.get("path") else ""
         warnings.append(f"SAM2 refinement requires detector boxes and a local SAM2 integration; no masks were generated.{asset_note}")
     if args.ocr == "paddleocr":
+        write_progress(args.progress_out, stage="ocr", message="Running OCR preprocessing...", percent=None)
         ocr_regions, ocr_warnings = run_paddleocr(args.image, width, height, args.ocr_threshold)
         regions.extend(ocr_regions)
         warnings.extend(ocr_warnings)
@@ -559,6 +595,7 @@ def main() -> int:
     with open(args.out, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, ensure_ascii=False, indent=2)
         fh.write("\n")
+    write_progress(args.progress_out, stage="done", message="Region preprocessing complete.", percent=100)
     return 0
 
 

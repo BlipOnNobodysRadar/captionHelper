@@ -294,7 +294,10 @@ sendBtn.addEventListener('click', async () => {
   const file = clipInput.files?.[0];
   if (!file) { addMsg('assistant', 'Attach a file first.'); return; }
   addMsg('user', `Attached: ${file.name}`);
-  addMsg('assistant', 'Thinking... preparing inputs and querying the local vision backend');
+  const regionEnabled = document.getElementById('enableRegionPreprocess')?.checked;
+  const autoDownload = document.getElementById('regionAutoDownload')?.checked;
+  const downloadHint = regionEnabled && autoDownload ? ' If selected preprocessing models are missing, they will be downloaded before captioning.' : '';
+  addMsg('assistant', 'Thinking... preparing inputs and querying the local vision backend' + downloadHint);
 
   const out = await postChatCaption(file);
   if (out.error) {
@@ -356,7 +359,11 @@ function renderActiveFiles(active) {
   activeFiles.textContent = active.map(item => {
     const file = typeof item === 'string' ? item : item.file;
     const elapsed = typeof item === 'string' ? null : item.elapsed_sec;
-    return elapsed === null || elapsed === undefined ? `• ${file}` : `• ${file} (${formatDuration(elapsed)})`;
+    const preprocess = typeof item === 'string' ? null : item.preprocess;
+    const progress = preprocess && preprocess.message
+      ? ` — ${preprocess.message}${Number.isFinite(Number(preprocess.percent)) ? ` (${Math.round(Number(preprocess.percent))}%)` : ''}`
+      : '';
+    return elapsed === null || elapsed === undefined ? `• ${file}${progress}` : `• ${file} (${formatDuration(elapsed)})${progress}`;
   }).join('\n');
 }
 

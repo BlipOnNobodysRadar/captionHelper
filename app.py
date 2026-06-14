@@ -476,7 +476,7 @@ def _detector_tags_from_context(context:dict)->str:
     return ", ".join(str(part).strip() for part in parts if str(part or "").strip())
 
 
-def _run_region_preprocess(image_path:str, tags_text:str="", source_caption_path:str|None=None, params:dict|None=None)->dict|None:
+def _run_region_preprocess(image_path:str, tags_text:str="", source_caption_path:str|None=None, params:dict|None=None, progress_callback=None)->dict|None:
     params = params or {}
     if not params.get("enable_region_preprocess"):
         return None
@@ -493,10 +493,13 @@ def _run_region_preprocess(image_path:str, tags_text:str="", source_caption_path
     ocr_model_path = str(params.get("region_ocr_model_path") or REGION_PREPROCESS_OCR_MODEL_PATH)
     with tempfile.NamedTemporaryFile(prefix="caption_regions_", suffix=".json", delete=False) as fh:
         out_path = fh.name
+    with tempfile.NamedTemporaryFile(prefix="caption_regions_progress_", suffix=".json", delete=False) as fh:
+        progress_path = fh.name
     cmd = [
         sys.executable, REGION_PREPROCESS_SCRIPT,
         "--image", image_path,
         "--out", out_path,
+        "--progress-out", progress_path,
         "--detector", detector,
         "--segmenter", segmenter,
         "--ocr", ocr,
@@ -516,12 +519,33 @@ def _run_region_preprocess(image_path:str, tags_text:str="", source_caption_path
     if source_caption_path:
         cmd.extend(["--tags", source_caption_path])
     try:
-        completed = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=600)
-        if completed.returncode != 0:
+        process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True)
+        last_progress = None
+        started_at = time.time()
+        while process.poll() is None:
+            if os.path.exists(progress_path):
+                try:
+                    with open(progress_path, "r", encoding="utf-8") as fh:
+                        progress = json.load(fh)
+                    if progress != last_progress:
+                        last_progress = progress
+                        if progress_callback:
+                            progress_callback(progress)
+                except Exception:
+                    pass
+            if time.time() - started_at > 600:
+                process.kill()
+                raise subprocess.TimeoutExpired(cmd, 600)
+            time.sleep(0.5)
+        process.communicate()
+        completed_returncode = process.returncode
+        if progress_callback:
+            progress_callback({"stage": "reading_results", "message": "Reading region preprocessing results...", "percent": 100})
+        if completed_returncode != 0:
             return {
                 "regions": [],
                 "ocr": [],
-                "error": (completed.stderr or completed.stdout or "region preprocessor failed").strip(),
+                "error": "region preprocessor failed",
                 "command": cmd,
             }
         with open(out_path, "r", encoding="utf-8") as fh:
@@ -531,6 +555,10 @@ def _run_region_preprocess(image_path:str, tags_text:str="", source_caption_path
     finally:
         try:
             os.remove(out_path)
+        except Exception:
+            pass
+        try:
+            os.remove(progress_path)
         except Exception:
             pass
 
@@ -1336,7 +1364,18 @@ def _process_one_target(fn:str, params:dict):
         model_management = None
         if image_mode and enable_region_preprocess:
             unload_result = _maybe_unload_llamacpp_for_preprocess(model, enabled=True)
-            region_payload = _run_region_preprocess(in_path, tags_text=_detector_tags_from_context(context), source_caption_path=None, params=params)
+            def progress_callback(progress:dict):
+                job_id = params.get("job_id")
+                if not job_id:
+                    return
+                with JOBS_LOCK:
+                    job = JOBS.get(job_id)
+                    if not job:
+                        return
+                    active_details = job.setdefault("active_details", {})
+                    active_details[fn] = progress
+
+            region_payload = _run_region_preprocess(in_path, tags_text=_detector_tags_from_context(context), source_caption_path=None, params=params, progress_callback=progress_callback)
             reload_result = _maybe_reload_llamacpp_after_preprocess(model, unload_result)
             model_management = {"unload_before_preprocess": unload_result, "reload_after_preprocess": reload_result}
             user_prompt = _augment_prompt_with_region_candidates(user_prompt, region_payload)
@@ -1418,6 +1457,7 @@ def _run_batch(job_id:str):
         if not job:
             return
         params = dict(job["params"])
+    params["job_id"] = job_id
 
     folder = params["target_folder"]
     image_mode = params["image_mode"]
@@ -1439,6 +1479,7 @@ def _run_batch(job_id:str):
         job["started_at"] = batch_started_at
         job["finished_at"] = None
         job["active"] = {}
+        job["active_details"] = {}
         job["current"] = None
         job["server_error_count"] = 0
         job["abort_reason"] = None
@@ -1477,6 +1518,8 @@ def _run_batch(job_id:str):
                     return
                 active = job.setdefault("active", {})
                 active.pop(fn, None)
+                active_details = job.setdefault("active_details", {})
+                active_details.pop(fn, None)
                 job["current"] = ", ".join(active.keys()) or None
                 job["results"].append(res)
                 job["completed"] += 1
@@ -1611,6 +1654,7 @@ def batch_start():
             "completed": 0,
             "current": None,
             "active": {},
+            "active_details": {},
             "results": [],
             "cancel": False,
             "started_at": None,
@@ -1682,6 +1726,7 @@ def batch_resume():
             "completed": 0,
             "current": None,
             "active": {},
+            "active_details": {},
             "results": [],
             "cancel": False,
             "started_at": None,
@@ -1729,9 +1774,14 @@ def batch_progress():
         avg_item_sec = (sum(durations) / len(durations)) if durations else None
 
         active_raw = job.get("active", {})
+        active_details = job.get("active_details", {}) if isinstance(job.get("active_details", {}), dict) else {}
         if isinstance(active_raw, dict):
             active = [
-                {"file": fn, "elapsed_sec": round(max(0.0, now - float(started)), 1)}
+                {
+                    "file": fn,
+                    "elapsed_sec": round(max(0.0, now - float(started)), 1),
+                    "preprocess": active_details.get(fn),
+                }
                 for fn, started in active_raw.items()
             ]
         else:
