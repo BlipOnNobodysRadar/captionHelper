@@ -865,6 +865,16 @@ def _copy_media_if_needed(source_path:str, output_paths:dict, overwrite:bool):
         return
     shutil.copy2(source_path, dest_path)
 
+
+def _resolve_existing_caption_for_prompt(source_txt:str, out_txt:str)->str:
+    # Copy-output mode must treat the source sidecar as the immutable original.
+    # When overwrite is enabled, only the copied/generated caption should be
+    # replaced; the prompt should not accidentally ground on an older copied
+    # output when the original sidecar exists.
+    if os.path.exists(source_txt):
+        return source_txt
+    return out_txt
+
 def _write_caption_error_debug_file(output_paths:dict, error:VisionAPIRequestError):
     raw_body = (error.body or "").strip()
     if not raw_body:
@@ -890,10 +900,13 @@ def _write_caption_error_debug_file(output_paths:dict, error:VisionAPIRequestErr
 
 
 def _select_targets(folder:str, image_mode:bool):
-    if image_mode:
-        selected = [p for p in os.listdir(folder) if allowed_image(os.path.join(folder, p))]
-    else:
-        selected = [p for p in os.listdir(folder) if allowed_video(os.path.join(folder, p))]
+    def is_processable_file(name:str)->bool:
+        path = os.path.join(folder, name)
+        if not os.path.isfile(path):
+            return False
+        return allowed_image(path) if image_mode else allowed_video(path)
+
+    selected = [p for p in os.listdir(folder) if is_processable_file(p)]
     selected.sort()
     return selected
 
@@ -936,7 +949,7 @@ def _process_one_target(fn:str, params:dict):
     try:
         old_text = ""
         if use_existing:
-            grounding_txt = source_txt if os.path.exists(source_txt) else out_txt
+            grounding_txt = _resolve_existing_caption_for_prompt(source_txt, out_txt)
             if os.path.exists(grounding_txt):
                 try:
                     with open(grounding_txt, "r", encoding="utf-8") as fh:
