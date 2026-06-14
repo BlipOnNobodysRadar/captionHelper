@@ -295,6 +295,8 @@ The lightweight checked-in `vision_preprocess.py` provides the orchestration con
 - `--ocr paddleocr` runs PaddleOCR when installed and filters text by confidence.
 - `--detector florence2` is exposed as an alternative prototype path.
 
+GroundingDINO selections run through the `transformers` zero-shot object detection pipeline when the model and runtime load successfully. If GroundingDINO runs but returns zero candidates, lower the detector box/text thresholds in the UI and/or add simpler object prompts/tags.
+
 For selected detector/segmenter/OCR models, the preprocessor resolves assets in this order:
 
 1. A user-supplied model path or directory, when provided in the UI or via CLI.

@@ -95,6 +95,8 @@ REGION_PREPROCESS_SEGMENTER = _env_first("CAPTION_REGION_SEGMENTER", default="no
 REGION_PREPROCESS_OCR = _env_first("CAPTION_REGION_OCR", default="paddleocr")
 REGION_PREPROCESS_MAX_REGIONS = int(_env_first("CAPTION_REGION_MAX_REGIONS", default="12"))
 REGION_PREPROCESS_OCR_THRESHOLD = float(_env_first("CAPTION_REGION_OCR_THRESHOLD", default="0.55"))
+REGION_PREPROCESS_DETECTOR_BOX_THRESHOLD = float(_env_first("CAPTION_REGION_DETECTOR_BOX_THRESHOLD", default="0.30"))
+REGION_PREPROCESS_DETECTOR_TEXT_THRESHOLD = float(_env_first("CAPTION_REGION_DETECTOR_TEXT_THRESHOLD", default="0.25"))
 REGION_PREPROCESS_MODEL_ROOT = _env_first("CAPTION_REGION_MODEL_ROOT", default=os.path.join(os.path.expanduser("~"), ".cache", "captionhelper", "vision_models"))
 REGION_PREPROCESS_AUTO_DOWNLOAD = str(_env_first("CAPTION_REGION_AUTO_DOWNLOAD", default="true")).strip().lower() in {"1", "true", "yes", "on"}
 REGION_PREPROCESS_LOAD_MODELS = str(_env_first("CAPTION_REGION_LOAD_MODELS", default="true")).strip().lower() in {"1", "true", "yes", "on"}
@@ -485,6 +487,8 @@ def _run_region_preprocess(image_path:str, tags_text:str="", source_caption_path
     ocr = str(params.get("region_ocr") or REGION_PREPROCESS_OCR)
     max_regions = _clamp_int(params.get("region_max_regions", REGION_PREPROCESS_MAX_REGIONS), REGION_PREPROCESS_MAX_REGIONS, 0, 64)
     ocr_threshold = float(params.get("region_ocr_threshold", REGION_PREPROCESS_OCR_THRESHOLD))
+    detector_box_threshold = float(params.get("region_detector_box_threshold", REGION_PREPROCESS_DETECTOR_BOX_THRESHOLD))
+    detector_text_threshold = float(params.get("region_detector_text_threshold", REGION_PREPROCESS_DETECTOR_TEXT_THRESHOLD))
     model_root = str(params.get("region_model_root") or REGION_PREPROCESS_MODEL_ROOT)
     auto_download = bool(params.get("region_auto_download", REGION_PREPROCESS_AUTO_DOWNLOAD))
     load_models = bool(params.get("region_load_models", REGION_PREPROCESS_LOAD_MODELS))
@@ -509,6 +513,8 @@ def _run_region_preprocess(image_path:str, tags_text:str="", source_caption_path
         "--ocr-model-path", ocr_model_path,
         "--max-regions", str(max_regions),
         "--ocr-threshold", str(ocr_threshold),
+        "--detector-box-threshold", str(detector_box_threshold),
+        "--detector-text-threshold", str(detector_text_threshold),
     ]
     if not auto_download:
         cmd.append("--no-auto-download")
@@ -982,6 +988,8 @@ def api_config():
             "ocr": REGION_PREPROCESS_OCR,
             "max_regions": REGION_PREPROCESS_MAX_REGIONS,
             "ocr_threshold": REGION_PREPROCESS_OCR_THRESHOLD,
+            "detector_box_threshold": REGION_PREPROCESS_DETECTOR_BOX_THRESHOLD,
+            "detector_text_threshold": REGION_PREPROCESS_DETECTOR_TEXT_THRESHOLD,
             "model_root": REGION_PREPROCESS_MODEL_ROOT,
             "auto_download": REGION_PREPROCESS_AUTO_DOWNLOAD,
             "load_models": REGION_PREPROCESS_LOAD_MODELS,
@@ -1116,6 +1124,8 @@ def chat_caption():
                     "region_ocr": request.form.get("region_ocr") or REGION_PREPROCESS_OCR,
                     "region_max_regions": request.form.get("region_max_regions") or REGION_PREPROCESS_MAX_REGIONS,
                     "region_ocr_threshold": request.form.get("region_ocr_threshold") or REGION_PREPROCESS_OCR_THRESHOLD,
+                    "region_detector_box_threshold": request.form.get("region_detector_box_threshold") or REGION_PREPROCESS_DETECTOR_BOX_THRESHOLD,
+                    "region_detector_text_threshold": request.form.get("region_detector_text_threshold") or REGION_PREPROCESS_DETECTOR_TEXT_THRESHOLD,
                     "region_model_root": request.form.get("region_model_root") or REGION_PREPROCESS_MODEL_ROOT,
                     "region_auto_download": request.form.get("region_auto_download","true").lower() in ("1","true","yes","on"),
                     "region_load_models": request.form.get("region_load_models","true").lower() in ("1","true","yes","on"),
@@ -1636,6 +1646,8 @@ def batch_start():
         "region_ocr": data.get("region_ocr", REGION_PREPROCESS_OCR),
         "region_max_regions": _clamp_int(data.get("region_max_regions", REGION_PREPROCESS_MAX_REGIONS), REGION_PREPROCESS_MAX_REGIONS, 0, 64),
         "region_ocr_threshold": float(data.get("region_ocr_threshold", REGION_PREPROCESS_OCR_THRESHOLD)),
+        "region_detector_box_threshold": float(data.get("region_detector_box_threshold", REGION_PREPROCESS_DETECTOR_BOX_THRESHOLD)),
+        "region_detector_text_threshold": float(data.get("region_detector_text_threshold", REGION_PREPROCESS_DETECTOR_TEXT_THRESHOLD)),
         "region_model_root": data.get("region_model_root") or REGION_PREPROCESS_MODEL_ROOT,
         "region_auto_download": region_auto_download,
         "region_load_models": region_load_models,

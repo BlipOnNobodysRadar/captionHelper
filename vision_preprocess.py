@@ -432,6 +432,114 @@ def load_selected_model_assets(model_assets: dict[str, Any], *, load_models: boo
     return status, warnings
 
 
+def run_groundingdino_detector(
+    path: str,
+    prompts: list[str],
+    asset: dict[str, Any],
+    width: int,
+    height: int,
+    *,
+    auto_download: bool,
+    box_threshold: float,
+    text_threshold: float,
+    progress_out: str = "",
+) -> tuple[list[RegionCandidate], dict[str, Any], list[str]]:
+    """Run GroundingDINO through transformers and return object candidates."""
+    diagnostics: dict[str, Any] = {
+        "selection": asset.get("selection"),
+        "runtime": "transformers",
+        "attempted": True,
+        "box_threshold": box_threshold,
+        "text_threshold": text_threshold,
+        "prompt_count": len(prompts),
+        "raw_detection_count": 0,
+        "kept_detection_count": 0,
+    }
+    warnings: list[str] = []
+    candidates: list[RegionCandidate] = []
+    ref = _model_load_reference(asset) if auto_download or asset.get("available") else None
+    if not ref:
+        diagnostics["error"] = "No available detector path and auto-download is disabled."
+        warnings.append("GroundingDINO detection skipped because no detector model path is available.")
+        return candidates, diagnostics, warnings
+
+    try:
+        import torch  # type: ignore
+        from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor  # type: ignore
+    except Exception as exc:
+        diagnostics["error"] = str(exc)
+        warnings.append(
+            f"GroundingDINO detection skipped because required runtime packages are unavailable: {exc}. "
+            "Run `uv sync` after pulling the latest dependency changes."
+        )
+        return candidates, diagnostics, warnings
+
+    try:
+        write_progress(progress_out, stage="detecting_objects", message="Running GroundingDINO object detection...", percent=None)
+        with Image.open(path) as im:
+            image = im.convert("RGB")
+        processor = AutoProcessor.from_pretrained(ref, local_files_only=not auto_download)
+        model = AutoModelForZeroShotObjectDetection.from_pretrained(ref, local_files_only=not auto_download)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model = model.to(device)
+        labels = [p.strip().lower() for p in prompts if p.strip()][:48]
+        text_prompt = ". ".join(labels)
+        if text_prompt and not text_prompt.endswith("."):
+            text_prompt += "."
+        diagnostics["device"] = device
+        diagnostics["text_prompt"] = text_prompt
+        inputs = processor(images=image, text=text_prompt, return_tensors="pt").to(device)
+        with torch.no_grad():
+            outputs = model(**inputs)
+        target_sizes = torch.tensor([[height, width]], device=device)
+        try:
+            results = processor.post_process_grounded_object_detection(
+                outputs,
+                inputs.input_ids,
+                box_threshold=box_threshold,
+                text_threshold=text_threshold,
+                target_sizes=target_sizes,
+            )
+        except TypeError:
+            results = processor.post_process_grounded_object_detection(
+                outputs,
+                box_threshold=box_threshold,
+                text_threshold=text_threshold,
+                target_sizes=target_sizes,
+            )
+        result = results[0] if results else {}
+        boxes = result.get("boxes", [])
+        scores = result.get("scores", [])
+        text_labels = result.get("labels", [])
+        diagnostics["raw_detection_count"] = len(boxes)
+        for box, score, label in zip(boxes, scores, text_labels):
+            if hasattr(box, "detach"):
+                box = box.detach().cpu().tolist()
+            if hasattr(score, "detach"):
+                score = float(score.detach().cpu().item())
+            label = str(label)
+            add_candidate(
+                candidates,
+                type_hint="obj",
+                bbox=[float(v) for v in box],
+                width=width,
+                height=height,
+                confidence=float(score),
+                source="groundingdino",
+                label=label,
+            )
+        diagnostics["kept_detection_count"] = len(candidates)
+        if not candidates:
+            warnings.append(
+                "GroundingDINO ran but produced zero object candidates. "
+                f"Try lowering thresholds (box={box_threshold}, text={text_threshold}) or adding simpler object prompts."
+            )
+    except Exception as exc:
+        diagnostics["error"] = str(exc)
+        warnings.append(f"GroundingDINO detection failed: {exc}")
+    return candidates, diagnostics, warnings
+
+
 def add_candidate(out: list[RegionCandidate], *, type_hint: str, bbox: list[float], width: int, height: int, confidence: float, source: str, label: str | None = None, text: str | None = None) -> None:
     pixel = sanitize_xyxy(bbox, width, height)
     if not pixel:
@@ -517,6 +625,8 @@ def main() -> int:
     parser.add_argument("--max-regions", type=int, default=12)
     parser.add_argument("--ocr-threshold", type=float, default=0.55)
     parser.add_argument("--iou-threshold", type=float, default=0.65)
+    parser.add_argument("--detector-box-threshold", type=float, default=0.30)
+    parser.add_argument("--detector-text-threshold", type=float, default=0.25)
     args = parser.parse_args()
 
     with Image.open(args.image) as im:
@@ -529,6 +639,7 @@ def main() -> int:
 
     warnings: list[str] = []
     regions: list[RegionCandidate] = []
+    detector_diagnostics: dict[str, Any] = {}
     prompts = build_detector_prompts(tags_text)
     model_assets: dict[str, Any] = {}
 
@@ -560,7 +671,21 @@ def main() -> int:
         detector_asset = model_assets.get("detector") or {}
         asset_note = f" Resolved model path: {detector_asset.get('path')}." if detector_asset.get("path") else ""
         detector_loaded = (model_load_status.get("detector") or {}).get("loaded")
-        if not detector_loaded:
+        if args.detector in {"groundingdino", "groundingdino1.5"} and (detector_loaded or detector_asset.get("available") or args.auto_download):
+            detected_regions, detector_diagnostics, detector_warnings = run_groundingdino_detector(
+                args.image,
+                prompts,
+                detector_asset,
+                width,
+                height,
+                auto_download=args.auto_download,
+                box_threshold=args.detector_box_threshold,
+                text_threshold=args.detector_text_threshold,
+                progress_out=args.progress_out,
+            )
+            regions.extend(detected_regions)
+            warnings.extend(detector_warnings)
+        elif not detector_loaded:
             warnings.append(f"{args.detector} preprocessing was skipped because the detector runtime/model did not load.{asset_note}")
     if args.segmenter != "none":
         segmenter_asset = model_assets.get("segmenter") or {}
@@ -587,6 +712,7 @@ def main() -> int:
         "model_assets": model_assets,
         "model_load_status": model_load_status,
         "detector_prompts": prompts,
+        "detector_diagnostics": detector_diagnostics,
         "regions": [c.to_json() for c in kept if c.type_hint == "obj"],
         "ocr": [c.to_json() for c in kept if c.type_hint == "text"],
         "warnings": warnings,

@@ -199,6 +199,8 @@ async function loadBackendConfig() {
       const regionOcr = document.getElementById('regionOcr');
       const regionMaxRegions = document.getElementById('regionMaxRegions');
       const regionOcrThreshold = document.getElementById('regionOcrThreshold');
+      const regionDetectorBoxThreshold = document.getElementById('regionDetectorBoxThreshold');
+      const regionDetectorTextThreshold = document.getElementById('regionDetectorTextThreshold');
       const regionModelRoot = document.getElementById('regionModelRoot');
       const regionAutoDownload = document.getElementById('regionAutoDownload');
       const regionLoadModels = document.getElementById('regionLoadModels');
@@ -210,6 +212,8 @@ async function loadBackendConfig() {
       if (regionOcr) regionOcr.value = cfg.region_preprocess.ocr || regionOcr.value;
       if (regionMaxRegions) regionMaxRegions.value = cfg.region_preprocess.max_regions ?? regionMaxRegions.value;
       if (regionOcrThreshold) regionOcrThreshold.value = cfg.region_preprocess.ocr_threshold ?? regionOcrThreshold.value;
+      if (regionDetectorBoxThreshold) regionDetectorBoxThreshold.value = cfg.region_preprocess.detector_box_threshold ?? regionDetectorBoxThreshold.value;
+      if (regionDetectorTextThreshold) regionDetectorTextThreshold.value = cfg.region_preprocess.detector_text_threshold ?? regionDetectorTextThreshold.value;
       if (regionModelRoot) regionModelRoot.value = cfg.region_preprocess.model_root || '';
       if (regionAutoDownload) regionAutoDownload.checked = Boolean(cfg.region_preprocess.auto_download);
       if (regionLoadModels) regionLoadModels.checked = Boolean(cfg.region_preprocess.load_models);
@@ -275,6 +279,8 @@ async function postChatCaption(file) {
   fd.append('region_ocr', document.getElementById('regionOcr').value);
   fd.append('region_max_regions', document.getElementById('regionMaxRegions').value);
   fd.append('region_ocr_threshold', document.getElementById('regionOcrThreshold').value);
+  fd.append('region_detector_box_threshold', document.getElementById('regionDetectorBoxThreshold').value);
+  fd.append('region_detector_text_threshold', document.getElementById('regionDetectorTextThreshold').value);
   fd.append('region_model_root', document.getElementById('regionModelRoot').value);
   fd.append('region_auto_download', document.getElementById('regionAutoDownload').checked);
   fd.append('region_load_models', document.getElementById('regionLoadModels').checked);
@@ -383,6 +389,8 @@ function getBatchBody() {
     region_ocr: document.getElementById('regionOcr').value,
     region_max_regions: Number(document.getElementById('regionMaxRegions').value),
     region_ocr_threshold: Number(document.getElementById('regionOcrThreshold').value),
+    region_detector_box_threshold: Number(document.getElementById('regionDetectorBoxThreshold').value),
+    region_detector_text_threshold: Number(document.getElementById('regionDetectorTextThreshold').value),
     region_model_root: document.getElementById('regionModelRoot').value,
     region_auto_download: document.getElementById('regionAutoDownload').checked,
     region_load_models: document.getElementById('regionLoadModels').checked,

@@ -125,6 +125,14 @@
             </div>
           </div>
           <div class="row">
+            <label>Detector box / text thresholds:</label>
+            <div class="inline-fields">
+              <input id="regionDetectorBoxThreshold" type="number" min="0" max="1" step="0.01" value="0.30">
+              <input id="regionDetectorTextThreshold" type="number" min="0" max="1" step="0.01" value="0.25">
+            </div>
+            <small style="color:#8a90a6">Lower these if GroundingDINO runs but returns zero candidates.</small>
+          </div>
+          <div class="row">
             <label>Model root:</label>
             <input id="regionModelRoot" placeholder="~/.cache/captionhelper/vision_models">
             <small style="color:#8a90a6">Expected local repo cache for downloaded or manually staged preprocessing models.</small>
