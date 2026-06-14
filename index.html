@@ -80,6 +80,63 @@
           <small style="color:#8a90a6">Caps caption length so the backend does not reserve too much context. 0 omits the cap.</small>
         </div>
 
+        <details class="metadata-details">
+          <summary>Region proposal preprocessing</summary>
+          <div class="row">
+            <label><input type="checkbox" id="enableRegionPreprocess"> Add object/OCR region candidates</label>
+            <small style="color:#8a90a6">Image mode only. Runs the local preprocessor before Gemma and injects REGION_CANDIDATES into the prompt.</small>
+          </div>
+          <div class="row">
+            <label><input type="checkbox" id="validateIdeogramJson"> Validate Ideogram 4 JSON</label>
+            <small style="color:#8a90a6">Automatically enabled when region preprocessing is on. Retries once with validator errors.</small>
+          </div>
+          <div class="row">
+            <label><input type="checkbox" id="regionAutoDownload" checked> Auto-download missing preprocessing models</label>
+            <small style="color:#8a90a6">Downloads selected model assets into the local model root when available. Disable this for fully offline/private runs.</small>
+          </div>
+          <div class="row">
+            <label><input type="checkbox" id="regionLoadModels" checked> Load selected preprocessing models</label>
+            <small style="color:#8a90a6">Warm-loads selected detector/segmenter/OCR runtimes so missing dependencies or weights are surfaced before captioning.</small>
+          </div>
+          <div class="row">
+            <label>Detector / segmenter / OCR:</label>
+            <div class="inline-fields">
+              <select id="regionDetector">
+                <option value="groundingdino" selected>GroundingDINO</option>
+                <option value="groundingdino1.5">GroundingDINO 1.5</option>
+                <option value="florence2">Florence-2</option>
+                <option value="none">none</option>
+              </select>
+              <select id="regionSegmenter">
+                <option value="none" selected>no SAM2</option>
+                <option value="sam2">SAM2 refine</option>
+              </select>
+              <select id="regionOcr">
+                <option value="paddleocr" selected>PaddleOCR</option>
+                <option value="none">no OCR</option>
+              </select>
+            </div>
+          </div>
+          <div class="row">
+            <label>Max regions / OCR threshold:</label>
+            <div class="inline-fields">
+              <input id="regionMaxRegions" type="number" min="0" max="64" value="12">
+              <input id="regionOcrThreshold" type="number" min="0" max="1" step="0.01" value="0.55">
+            </div>
+          </div>
+          <div class="row">
+            <label>Model root:</label>
+            <input id="regionModelRoot" placeholder="~/.cache/captionhelper/vision_models">
+            <small style="color:#8a90a6">Expected local repo cache for downloaded or manually staged preprocessing models.</small>
+          </div>
+          <div class="row">
+            <label>Override model paths/directories:</label>
+            <input id="regionDetectorModelPath" placeholder="Detector model path or directory (optional)">
+            <input id="regionSegmenterModelPath" placeholder="SAM2 model path or directory (optional)">
+            <input id="regionOcrModelPath" placeholder="OCR model path or directory (optional)">
+          </div>
+        </details>
+
         <div class="row">
           <label>Parallel batch workers:</label>
           <input id="maxConcurrent" type="number" min="1" max="16" value="4">

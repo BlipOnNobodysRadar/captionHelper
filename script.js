@@ -193,6 +193,30 @@ async function loadBackendConfig() {
     if (maxOutputTokens && Number.isFinite(Number(cfg.max_output_tokens))) {
       maxOutputTokens.value = cfg.max_output_tokens;
     }
+    if (cfg.region_preprocess) {
+      const regionDetector = document.getElementById('regionDetector');
+      const regionSegmenter = document.getElementById('regionSegmenter');
+      const regionOcr = document.getElementById('regionOcr');
+      const regionMaxRegions = document.getElementById('regionMaxRegions');
+      const regionOcrThreshold = document.getElementById('regionOcrThreshold');
+      const regionModelRoot = document.getElementById('regionModelRoot');
+      const regionAutoDownload = document.getElementById('regionAutoDownload');
+      const regionLoadModels = document.getElementById('regionLoadModels');
+      const regionDetectorModelPath = document.getElementById('regionDetectorModelPath');
+      const regionSegmenterModelPath = document.getElementById('regionSegmenterModelPath');
+      const regionOcrModelPath = document.getElementById('regionOcrModelPath');
+      if (regionDetector) regionDetector.value = cfg.region_preprocess.detector || regionDetector.value;
+      if (regionSegmenter) regionSegmenter.value = cfg.region_preprocess.segmenter || regionSegmenter.value;
+      if (regionOcr) regionOcr.value = cfg.region_preprocess.ocr || regionOcr.value;
+      if (regionMaxRegions) regionMaxRegions.value = cfg.region_preprocess.max_regions ?? regionMaxRegions.value;
+      if (regionOcrThreshold) regionOcrThreshold.value = cfg.region_preprocess.ocr_threshold ?? regionOcrThreshold.value;
+      if (regionModelRoot) regionModelRoot.value = cfg.region_preprocess.model_root || '';
+      if (regionAutoDownload) regionAutoDownload.checked = Boolean(cfg.region_preprocess.auto_download);
+      if (regionLoadModels) regionLoadModels.checked = Boolean(cfg.region_preprocess.load_models);
+      if (regionDetectorModelPath) regionDetectorModelPath.value = cfg.region_preprocess.detector_model_path || '';
+      if (regionSegmenterModelPath) regionSegmenterModelPath.value = cfg.region_preprocess.segmenter_model_path || '';
+      if (regionOcrModelPath) regionOcrModelPath.value = cfg.region_preprocess.ocr_model_path || '';
+    }
 
     populatePresets(cfg.caption_presets);
 
@@ -233,6 +257,19 @@ async function postChatCaption(file) {
   fd.append('prefill', document.getElementById('prefill').value);
   fd.append('max_image_side', document.getElementById('maxImageSide').value);
   fd.append('max_output_tokens', document.getElementById('maxOutputTokens').value);
+  fd.append('enable_region_preprocess', document.getElementById('enableRegionPreprocess').checked);
+  fd.append('validate_ideogram_json', document.getElementById('validateIdeogramJson').checked);
+  fd.append('region_detector', document.getElementById('regionDetector').value);
+  fd.append('region_segmenter', document.getElementById('regionSegmenter').value);
+  fd.append('region_ocr', document.getElementById('regionOcr').value);
+  fd.append('region_max_regions', document.getElementById('regionMaxRegions').value);
+  fd.append('region_ocr_threshold', document.getElementById('regionOcrThreshold').value);
+  fd.append('region_model_root', document.getElementById('regionModelRoot').value);
+  fd.append('region_auto_download', document.getElementById('regionAutoDownload').checked);
+  fd.append('region_load_models', document.getElementById('regionLoadModels').checked);
+  fd.append('region_detector_model_path', document.getElementById('regionDetectorModelPath').value);
+  fd.append('region_segmenter_model_path', document.getElementById('regionSegmenterModelPath').value);
+  fd.append('region_ocr_model_path', document.getElementById('regionOcrModelPath').value);
   fd.append('use_existing_caption', document.getElementById('useExistingCaption').checked);
   fd.append('existing_caption', document.getElementById('existingCaption').value);
   appendMetadataFields(fd);
@@ -320,6 +357,19 @@ function getBatchBody() {
     num_frames: Number(document.getElementById('numFrames').value),
     max_image_side: Number(document.getElementById('maxImageSide').value),
     max_output_tokens: Number(document.getElementById('maxOutputTokens').value),
+    enable_region_preprocess: document.getElementById('enableRegionPreprocess').checked,
+    validate_ideogram_json: document.getElementById('validateIdeogramJson').checked,
+    region_detector: document.getElementById('regionDetector').value,
+    region_segmenter: document.getElementById('regionSegmenter').value,
+    region_ocr: document.getElementById('regionOcr').value,
+    region_max_regions: Number(document.getElementById('regionMaxRegions').value),
+    region_ocr_threshold: Number(document.getElementById('regionOcrThreshold').value),
+    region_model_root: document.getElementById('regionModelRoot').value,
+    region_auto_download: document.getElementById('regionAutoDownload').checked,
+    region_load_models: document.getElementById('regionLoadModels').checked,
+    region_detector_model_path: document.getElementById('regionDetectorModelPath').value,
+    region_segmenter_model_path: document.getElementById('regionSegmenterModelPath').value,
+    region_ocr_model_path: document.getElementById('regionOcrModelPath').value,
     max_concurrent: Number(document.getElementById('maxConcurrent').value),
     abort_after_server_errors: Number(document.getElementById('abortAfterServerErrors').value),
     sampling_type: document.getElementById('samplingType').value,
