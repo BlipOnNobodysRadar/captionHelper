@@ -1078,7 +1078,7 @@ def chat_caption():
     use_existing = request.form.get("use_existing_caption","false").lower() in ("1","true","yes","on")
     existing_caption_text = request.form.get("existing_caption","")
     enable_region_preprocess = request.form.get("enable_region_preprocess","false").lower() in ("1","true","yes","on")
-    validate_ideogram_json = request.form.get("validate_ideogram_json","false").lower() in ("1","true","yes","on") or enable_region_preprocess
+    validate_ideogram_json = request.form.get("validate_ideogram_json","false").lower() in ("1","true","yes","on")
 
     media_kind = "image" if image_mode else "clip"
 
@@ -1333,7 +1333,7 @@ def _process_one_target(fn:str, params:dict):
     max_image_side = params.get("max_image_side", DEFAULT_MAX_IMAGE_SIDE)
     max_output_tokens = params.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS)
     enable_region_preprocess = bool(params.get("enable_region_preprocess", False))
-    validate_ideogram_json = bool(params.get("validate_ideogram_json", False)) or enable_region_preprocess
+    validate_ideogram_json = bool(params.get("validate_ideogram_json", False))
 
     media_kind = "image" if image_mode else "clip"
     in_path = os.path.join(folder, fn)
@@ -1613,7 +1613,7 @@ def batch_start():
     max_concurrent = _clamp_int(data.get("max_concurrent", DEFAULT_BATCH_CONCURRENCY), DEFAULT_BATCH_CONCURRENCY, 1, MAX_BATCH_CONCURRENCY)
     abort_after_server_errors = _clamp_int(data.get("abort_after_server_errors", API_ABORT_AFTER_SERVER_ERRORS), API_ABORT_AFTER_SERVER_ERRORS, 0, 999)
     enable_region_preprocess = bool(data.get("enable_region_preprocess", False))
-    validate_ideogram_json = bool(data.get("validate_ideogram_json", False)) or enable_region_preprocess
+    validate_ideogram_json = bool(data.get("validate_ideogram_json", False))
     region_auto_download = bool(data.get("region_auto_download", REGION_PREPROCESS_AUTO_DOWNLOAD))
     region_load_models = bool(data.get("region_load_models", REGION_PREPROCESS_LOAD_MODELS))
 

@@ -25,6 +25,7 @@ FALLBACK_VOCABULARY = [
     "vehicle", "building", "window", "text", "logo", "signature", "watermark",
 ]
 META_TAG_RE = re.compile(r"^(score_\d+|rating[:_].+|best_quality|highres|absurdres|masterpiece|safe|questionable|explicit)$", re.I)
+LOW_VALUE_DETECTOR_TAG_RE = re.compile(r"^(source |style |artist |game model|looking at |solo$|1girl$|1boy$|2girls$|2boys$)", re.I)
 
 
 def write_progress(path: str, *, stage: str, message: str, percent: float | None = None) -> None:
@@ -139,6 +140,9 @@ def split_tags(text: str) -> list[str]:
         if not tag or META_TAG_RE.match(tag):
             continue
         tag = tag.replace("_", " ")
+        tag = re.sub(r"\([^)]*\)", "", tag).strip()
+        if LOW_VALUE_DETECTOR_TAG_RE.match(tag):
+            continue
         if len(tag) <= 40:
             tags.append(tag)
     return tags
@@ -493,6 +497,18 @@ def run_groundingdino_detector(
             outputs = model(**inputs)
         target_sizes = torch.tensor([[height, width]], device=device)
         try:
+            # Newer Transformers uses `threshold`; older examples used
+            # `box_threshold`. Try the current API first.
+            results = processor.post_process_grounded_object_detection(
+                outputs,
+                inputs.input_ids,
+                threshold=box_threshold,
+                text_threshold=text_threshold,
+                target_sizes=target_sizes,
+                text_labels=[labels],
+            )
+            diagnostics["post_process_api"] = "threshold"
+        except TypeError:
             results = processor.post_process_grounded_object_detection(
                 outputs,
                 inputs.input_ids,
@@ -500,17 +516,11 @@ def run_groundingdino_detector(
                 text_threshold=text_threshold,
                 target_sizes=target_sizes,
             )
-        except TypeError:
-            results = processor.post_process_grounded_object_detection(
-                outputs,
-                box_threshold=box_threshold,
-                text_threshold=text_threshold,
-                target_sizes=target_sizes,
-            )
+            diagnostics["post_process_api"] = "box_threshold"
         result = results[0] if results else {}
         boxes = result.get("boxes", [])
         scores = result.get("scores", [])
-        text_labels = result.get("labels", [])
+        text_labels = result.get("text_labels") or result.get("labels", [])
         diagnostics["raw_detection_count"] = len(boxes)
         for box, score, label in zip(boxes, scores, text_labels):
             if hasattr(box, "detach"):
