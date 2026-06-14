@@ -303,10 +303,10 @@ For selected detector/segmenter/OCR models, the preprocessor resolves assets in 
 
 When **Load selected preprocessing models** is enabled, CaptionHelper also asks the preprocessor to warm-load the selected detector/segmenter/OCR runtime after resolving assets. This surfaces missing Python packages or incompatible checkpoints before the Gemma caption request. Disable auto-download for fully offline/private runs, or point the override field at an already-downloaded model directory/checkpoint.
 
-If the UI reports that preprocessing was skipped because packages such as `huggingface_hub`, `transformers`, `torch`, or `paddleocr` are missing, install the preprocessing packages into the same environment running CaptionHelper:
+If the UI reports that preprocessing was skipped because packages such as `huggingface_hub`, `transformers`, `torch`, or `paddleocr` are missing, sync the current app dependencies in the same environment running CaptionHelper:
 
 ```bash
-uv pip install huggingface-hub transformers torch paddleocr
+uv sync
 ```
 
 `huggingface-hub` is needed for the **Auto-download missing preprocessing models** checkbox. `transformers` and `torch` are needed to warm-load GroundingDINO/Florence-style detectors, and `paddleocr` is needed for OCR.
