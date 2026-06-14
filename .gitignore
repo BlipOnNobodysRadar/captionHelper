@@ -31,3 +31,5 @@ Thumbs.db
 
 # Archives
 *.zip
+.caption_jobs/
+.caption_jobs/*.tmp

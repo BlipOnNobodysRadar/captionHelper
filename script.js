@@ -260,6 +260,7 @@ sendBtn.addEventListener('click', async () => {
 // ---- Batch with progress & cancel ----
 const startBtn = document.getElementById('startBatch');
 const cancelBtn = document.getElementById('cancelBatch');
+const resumeBtn = document.getElementById('resumeBatch');
 const batchLog = document.getElementById('batchLog');
 const batchStatus = document.getElementById('batchStatus');
 const batchProgress = document.getElementById('batchProgress');
@@ -267,6 +268,7 @@ const batchStats = document.getElementById('batchStats');
 const activeFiles = document.getElementById('activeFiles');
 
 let currentJobId = null;
+let resumableJobId = null;
 let progressTimer = null;
 let lastResultCount = 0;
 
@@ -383,6 +385,10 @@ async function pollProgress() {
     }
 
     if (out.status === 'done' || out.status === 'cancelled' || out.status === 'failed') {
+      resumableJobId = out.status === 'failed' ? currentJobId : null;
+      if (resumeBtn) {
+        resumeBtn.disabled = out.status !== 'failed';
+      }
       if (document.getElementById('notifyDone').checked) {
         if (out.status === 'done') alert('Batch complete.');
         else if (out.status === 'failed') alert(out.abort_reason || 'Batch failed.');
@@ -404,6 +410,7 @@ function stopProgress() {
   currentJobId = null;
   startBtn.disabled = false;
   cancelBtn.disabled = true;
+  if (resumeBtn) resumeBtn.disabled = !resumableJobId;
   startBtn.textContent = 'Start Batch Process';
 }
 
@@ -415,6 +422,8 @@ startBtn.addEventListener('click', async () => {
   if (activeFiles) { activeFiles.textContent = ''; activeFiles.style.display = 'none'; }
   batchProgress.value = 0;
   lastResultCount = 0;
+  resumableJobId = null;
+  if (resumeBtn) resumeBtn.disabled = true;
 
   try {
     const body = getBatchBody();
@@ -438,6 +447,47 @@ startBtn.addEventListener('click', async () => {
     batchStatus.textContent = 'Error: ' + e;
   }
 });
+
+if (resumeBtn) {
+  resumeBtn.addEventListener('click', async () => {
+    if (currentJobId || !resumableJobId) return;
+    const resumeFrom = resumableJobId;
+    batchLog.textContent += `\nResuming failed batch ${resumeFrom}; successful/skipped items from the previous run will be reused.\n`;
+    batchStatus.textContent = 'Resuming...';
+    if (batchStats) batchStats.textContent = '';
+    if (activeFiles) { activeFiles.textContent = ''; activeFiles.style.display = 'none'; }
+    batchProgress.value = 0;
+    lastResultCount = 0;
+    resumeBtn.disabled = true;
+
+    try {
+      const res = await fetch('/api/batch-resume', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({job_id: resumeFrom})
+      });
+      const out = await res.json();
+      if (out.error) {
+        batchStatus.textContent = 'Error: ' + out.error;
+        resumableJobId = resumeFrom;
+        resumeBtn.disabled = false;
+        return;
+      }
+      currentJobId = out.job_id;
+      resumableJobId = null;
+      startBtn.disabled = true;
+      startBtn.textContent = 'Running...';
+      cancelBtn.disabled = false;
+      batchStatus.textContent = `resumed — retrying ${out.total || 0} item(s)`;
+      progressTimer = setInterval(pollProgress, 1000);
+      pollProgress();
+    } catch (e) {
+      batchStatus.textContent = 'Error: ' + e;
+      resumableJobId = resumeFrom;
+      resumeBtn.disabled = false;
+    }
+  });
+}
 
 cancelBtn.addEventListener('click', async () => {
   if (!currentJobId) return;

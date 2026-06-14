@@ -16,6 +16,7 @@ It is meant for dataset prep: point it at a folder of images or clips, choose a 
 - Max image side downscaling to reduce multimodal context pressure.
 - Max output token cap for shorter, safer caption generations.
 - Better backend/API error messages, retries, and a fail-fast guard so a bad concurrency/context setting does not chew through an entire folder.
+- Resume support for batches halted by backend/API errors, reusing successfully written captions from the prior run and retrying only unfinished/errored items.
 
 ## Requirements
 
@@ -190,6 +191,12 @@ The optional tag-group fields are shared by chat and batch requests. For batch j
 If **Use existing caption** is enabled during batch mode, the app looks for a matching `.txt` file next to each image/video and passes that text through the active user message template as grounding.
 
 This is useful for converting booru tags, rough captions, or older captions into more detailed natural-language captions or structured preset outputs.
+
+## Resuming halted batches
+
+If a batch stops after reaching the configured backend/API error limit, click **Resume halted batch** to start a new job from the failed run. captionHelper records local job state in `.caption_jobs/` by default, which is ignored by git and intended to stay on your machine.
+
+On resume, successful or skipped items from the halted run are treated as already complete, so their existing non-errored caption files are left in place. Only files that errored or never started are queued again. Set `CAPTION_USER_JOBS_PATH=/path/to/jobs` if you want to keep these local resume records somewhere else.
 
 ## Parallel/context guidance
 

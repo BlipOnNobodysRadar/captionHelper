@@ -86,6 +86,7 @@ API_ABORT_AFTER_SERVER_ERRORS = int(_env_first("CAPTION_ABORT_AFTER_SERVER_ERROR
 DEFAULT_MAX_IMAGE_SIDE = int(_env_first("CAPTION_MAX_IMAGE_SIDE", "LLAMA_CPP_MAX_IMAGE_SIDE", "LAMMA_CPP_MAX_IMAGE_SIDE", "LMSTUDIO_MAX_IMAGE_SIDE", default="1024"))
 DEFAULT_MAX_OUTPUT_TOKENS = int(_env_first("CAPTION_MAX_OUTPUT_TOKENS", "LLAMA_CPP_MAX_OUTPUT_TOKENS", "LAMMA_CPP_MAX_OUTPUT_TOKENS", "LMSTUDIO_MAX_OUTPUT_TOKENS", default="512"))
 USER_PRESETS_PATH = _env_first("CAPTION_USER_PRESETS_PATH", default="user_presets.json")
+USER_JOBS_PATH = _env_first("CAPTION_USER_JOBS_PATH", default=".caption_jobs")
 APP_HOST = _env_first("CAPTION_HOST", default="127.0.0.1")
 APP_PORT = int(_env_first("CAPTION_PORT", default="5057"))
 APP_DEBUG = str(_env_first("CAPTION_DEBUG", default="false")).strip().lower() in {"1", "true", "yes", "on"}
@@ -189,10 +190,7 @@ def _copy_builtin_presets():
 
 
 def _user_presets_file_path()->str:
-    path = os.path.expanduser(USER_PRESETS_PATH)
-    if not os.path.isabs(path):
-        path = os.path.join(app.root_path, path)
-    return path
+    return _local_user_file_path(USER_PRESETS_PATH)
 
 
 def _slugify_preset_id(name:str)->str:
@@ -263,6 +261,13 @@ def load_user_presets()->list:
         seen.add(preset["id"])
         presets.append(preset)
     return presets
+
+
+def _local_user_file_path(configured_path:str)->str:
+    path = os.path.expanduser(configured_path)
+    if not os.path.isabs(path):
+        path = os.path.join(app.root_path, path)
+    return path
 
 
 def save_user_presets(presets:list)->None:
@@ -747,6 +752,71 @@ JOBS = {}
 JOBS_LOCK = threading.Lock()
 
 
+def _user_jobs_dir_path()->str:
+    return _local_user_file_path(USER_JOBS_PATH)
+
+
+def _job_record_path(job_id:str)->str:
+    return os.path.join(_user_jobs_dir_path(), f"{job_id}.json")
+
+
+def _public_job_record(job:dict)->dict:
+    """Return the local, user-private job state safe to persist for resuming."""
+    return {
+        "id": job.get("id"),
+        "status": job.get("status"),
+        "created_at": job.get("created_at"),
+        "started_at": job.get("started_at"),
+        "finished_at": job.get("finished_at"),
+        "params": job.get("params", {}),
+        "total": job.get("total", 0),
+        "completed": job.get("completed", 0),
+        "results": job.get("results", []),
+        "server_error_count": job.get("server_error_count", 0),
+        "abort_reason": job.get("abort_reason"),
+        "selected_targets": job.get("selected_targets", []),
+        "resume_of": job.get("resume_of"),
+    }
+
+
+def _persist_job(job:dict)->None:
+    """Persist job state in a local ignored folder so failed batches can resume."""
+    os.makedirs(_user_jobs_dir_path(), exist_ok=True)
+    record = _public_job_record(job)
+    path = _job_record_path(str(record["id"]))
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as fh:
+        json.dump(record, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+    os.replace(tmp_path, path)
+
+
+def _load_job_record(job_id:str)->dict|None:
+    path = _job_record_path(job_id)
+    if not os.path.exists(path):
+        return None
+    with open(path, "r", encoding="utf-8") as fh:
+        record = json.load(fh)
+    return record if isinstance(record, dict) else None
+
+
+def _resume_targets_from_record(record:dict)->list[str]:
+    """Only retry files that did not produce a successful or skipped result."""
+    selected = list(record.get("selected_targets") or [])
+    if not selected:
+        params = record.get("params") or {}
+        folder = params.get("target_folder")
+        if folder and os.path.isdir(folder):
+            selected = _select_targets(folder, bool(params.get("image_mode")))
+
+    terminal = {
+        r.get("file")
+        for r in record.get("results", [])
+        if isinstance(r, dict) and (r.get("ok") or r.get("skipped"))
+    }
+    return [fn for fn in selected if fn not in terminal]
+
+
 def _safe_filename_fragment(value:str)->str:
     fragment = str(value or "").strip()
     if not fragment:
@@ -935,7 +1005,7 @@ def _run_batch(job_id:str):
     image_mode = params["image_mode"]
     max_concurrent = params["max_concurrent"]
     abort_after_server_errors = params.get("abort_after_server_errors", API_ABORT_AFTER_SERVER_ERRORS)
-    targets = _select_targets(folder, image_mode)
+    targets = list(params["resume_targets"] if "resume_targets" in params else _select_targets(folder, image_mode))
 
     work_q = queue.Queue()
     for fn in targets:
@@ -954,6 +1024,8 @@ def _run_batch(job_id:str):
         job["current"] = None
         job["server_error_count"] = 0
         job["abort_reason"] = None
+        job["selected_targets"] = targets
+        _persist_job(job)
 
     def worker(worker_id:int):
         while True:
@@ -1005,6 +1077,7 @@ def _run_batch(job_id:str):
                             f"{context_hint} "
                             "Already-written captions are left alone."
                         )
+                _persist_job(job)
             work_q.task_done()
             time.sleep(0)
 
@@ -1028,6 +1101,7 @@ def _run_batch(job_id:str):
             job["status"] = "done"
         job["active"] = {}
         job["current"] = None
+        _persist_job(job)
 
 @app.route("/api/batch-start", methods=["POST"])
 def batch_start():
@@ -1109,7 +1183,9 @@ def batch_start():
             "last_result_at": None,
             "server_error_count": 0,
             "abort_reason": None,
+            "selected_targets": [],
         }
+        _persist_job(JOBS[job_id])
 
     t = threading.Thread(target=_run_batch, args=(job_id,), daemon=True)
     t.start()
@@ -1127,6 +1203,72 @@ def batch_start():
         "filename_affix_position": filename_affix_position,
     })
 
+
+@app.route("/api/batch-resume", methods=["POST"])
+def batch_resume():
+    data = request.get_json(force=True) or {}
+    source_job_id = (data.get("job_id") or "").strip()
+    if not source_job_id:
+        return jsonify({"error":"Missing job_id"}), 400
+
+    with JOBS_LOCK:
+        source_job = JOBS.get(source_job_id)
+        source_record = _public_job_record(source_job) if source_job else None
+    if source_record is None:
+        source_record = _load_job_record(source_job_id)
+    if not source_record:
+        return jsonify({"error":"Unknown job_id"}), 404
+    if source_record.get("status") not in {"failed", "cancelled", "done"}:
+        return jsonify({"error":"Only completed, cancelled, or failed batches can be resumed."}), 400
+
+    params = dict(source_record.get("params") or {})
+    folder = (params.get("target_folder") or "").strip()
+    if not folder or not os.path.isdir(folder):
+        return jsonify({"error":"Original target folder is no longer available."}), 400
+
+    resume_targets = _resume_targets_from_record(source_record)
+    params["resume_targets"] = resume_targets
+    # A resume should not fail immediately because the previous run already hit errors.
+    params["abort_after_server_errors"] = _clamp_int(
+        params.get("abort_after_server_errors", API_ABORT_AFTER_SERVER_ERRORS),
+        API_ABORT_AFTER_SERVER_ERRORS,
+        0,
+        999,
+    )
+
+    job_id = uuid.uuid4().hex
+    with JOBS_LOCK:
+        JOBS[job_id] = {
+            "id": job_id,
+            "status": "queued",
+            "created_at": time.time(),
+            "params": params,
+            "total": len(resume_targets),
+            "completed": 0,
+            "current": None,
+            "active": {},
+            "results": [],
+            "cancel": False,
+            "started_at": None,
+            "finished_at": None,
+            "last_result_at": None,
+            "server_error_count": 0,
+            "abort_reason": None,
+            "selected_targets": resume_targets,
+            "resume_of": source_job_id,
+        }
+        _persist_job(JOBS[job_id])
+
+    t = threading.Thread(target=_run_batch, args=(job_id,), daemon=True)
+    t.start()
+
+    return jsonify({
+        "job_id": job_id,
+        "resumed_from": source_job_id,
+        "total": len(resume_targets),
+        "max_concurrent": params.get("max_concurrent", DEFAULT_BATCH_CONCURRENCY),
+    })
+
 @app.route("/api/batch-progress", methods=["GET"])
 def batch_progress():
     job_id = request.args.get("job_id","").strip()
@@ -1140,7 +1282,7 @@ def batch_progress():
         status = job["status"]
         started_at = job.get("started_at") or job.get("created_at") or now
         finished_at = job.get("finished_at")
-        elapsed_until = finished_at if (status in ("done", "cancelled") and finished_at) else now
+        elapsed_until = finished_at if (status in ("done", "cancelled", "failed") and finished_at) else now
         elapsed_sec = max(0.0, elapsed_until - started_at)
         completed = job["completed"]
         total = job["total"]
@@ -1212,7 +1354,7 @@ def batch_caption_oneshot():
             job = JOBS.get(job_id)
             if not job:
                 break
-            if job["status"] in ("done", "cancelled"):
+            if job["status"] in ("done", "cancelled", "failed"):
                 active_raw = job.get("active", {})
                 active = list(active_raw.keys()) if isinstance(active_raw, dict) else list(active_raw)
                 results = {
