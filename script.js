@@ -247,6 +247,17 @@ function addMsg(who, text) {
   chatLog.scrollTop = chatLog.scrollHeight;
 }
 
+function formatRegionPreprocessNotice(summary) {
+  if (!summary || !summary.enabled) return '';
+  const warnings = Array.isArray(summary.warnings) ? summary.warnings.filter(Boolean) : [];
+  const count = Number(summary.candidate_count || 0);
+  const prefix = summary.skipped
+    ? '⚠️ Region preprocessing was skipped or produced no usable candidates.'
+    : `ℹ️ Region preprocessing produced ${count} candidate${count === 1 ? '' : 's'}.`;
+  if (!warnings.length) return prefix;
+  return `${prefix}\n${warnings.map(w => `• ${w}`).join('\n')}`;
+}
+
 async function postChatCaption(file) {
   const fd = new FormData();
   fd.append('file', file);
@@ -290,7 +301,8 @@ sendBtn.addEventListener('click', async () => {
     addMsg('assistant', 'Error: ' + out.error);
   } else {
     const framesInfo = (typeof out.frames_used === 'number') ? ` [inputs: ${out.frames_used}] ` : ' ';
-    addMsg('assistant', framesInfo + out.caption);
+    const preprocessNotice = formatRegionPreprocessNotice(out.region_preprocess_summary);
+    addMsg('assistant', (preprocessNotice ? preprocessNotice + '\n\n' : '') + framesInfo + out.caption);
   }
 });
 
@@ -424,11 +436,15 @@ async function pollProgress() {
         if (r.ok) {
           const mediaOut = r.media_out ? ` + ${r.media_out}` : '';
           logBatch(`✓ ${r.file} -> ${r.out}${mediaOut}${took}`);
+          const notice = formatRegionPreprocessNotice(r.region_preprocess_summary);
+          if (notice) logBatch(notice);
         }
         else if (r.skipped) logBatch(`↷ ${r.file} (skipped: ${r.reason})${took}`);
         else {
           const code = r.status_code ? ` [HTTP ${r.status_code}]` : '';
           logBatch(`✗ ${r.file}${code}: ${r.error}${took}`);
+          const notice = formatRegionPreprocessNotice(r.region_preprocess_summary);
+          if (notice) logBatch(notice);
         }
       }
       lastResultCount = out.results.length;

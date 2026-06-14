@@ -239,7 +239,10 @@ def resolve_model_asset(
     try:
         from huggingface_hub import snapshot_download  # type: ignore
     except Exception as exc:
-        warnings.append(f"Cannot auto-download {spec['description']} because huggingface_hub is unavailable: {exc}")
+        warnings.append(
+            f"Cannot auto-download {spec['description']} because huggingface_hub is unavailable: {exc}. "
+            "Install/update app dependencies with `uv sync` or provide a local model path."
+        )
         return {
             "component": component,
             "selection": selection,
@@ -324,7 +327,11 @@ def load_selected_model_assets(model_assets: dict[str, Any], *, load_models: boo
                 del processor, model
             except Exception as exc:
                 item["error"] = str(exc)
-                warnings.append(f"Could not load {selection} detector model: {exc}")
+                warnings.append(
+                    f"Could not load {selection} detector model: {exc}. "
+                    "Install optional preprocessing dependencies with `uv sync --extra preprocess`, "
+                    "or disable 'Load selected preprocessing models'."
+                )
         elif selection == "florence2":
             try:
                 from transformers import AutoModelForCausalLM, AutoProcessor  # type: ignore
@@ -340,7 +347,11 @@ def load_selected_model_assets(model_assets: dict[str, Any], *, load_models: boo
                 del processor, model
             except Exception as exc:
                 item["error"] = str(exc)
-                warnings.append(f"Could not load Florence-2 model: {exc}")
+                warnings.append(
+                    f"Could not load Florence-2 model: {exc}. "
+                    "Install optional preprocessing dependencies with `uv sync --extra preprocess`, "
+                    "or disable 'Load selected preprocessing models'."
+                )
         status["detector"] = item
 
     segmenter = model_assets.get("segmenter")
@@ -356,7 +367,10 @@ def load_selected_model_assets(model_assets: dict[str, Any], *, load_models: boo
                 item.update({"loaded": True, "runtime": "sam2", "module": getattr(sam2, "__name__", "sam2")})
             except Exception as exc:
                 item["error"] = str(exc)
-                warnings.append(f"Could not import/load SAM2 runtime for model at {ref}: {exc}")
+                warnings.append(
+                    f"Could not import/load SAM2 runtime for model at {ref}: {exc}. "
+                    "Install SAM2 in the app environment or disable SAM2 refinement."
+                )
         status["segmenter"] = item
 
     ocr = model_assets.get("ocr")
@@ -377,7 +391,11 @@ def load_selected_model_assets(model_assets: dict[str, Any], *, load_models: boo
             del engine
         except Exception as exc:
             item["error"] = str(exc)
-            warnings.append(f"Could not load PaddleOCR runtime: {exc}")
+            warnings.append(
+                f"Could not load PaddleOCR runtime: {exc}. "
+                "Install optional preprocessing dependencies with `uv sync --extra preprocess`, "
+                "or set OCR to 'none'."
+            )
         status["ocr"] = item
 
     return status, warnings
@@ -506,7 +524,9 @@ def main() -> int:
     if args.detector != "none":
         detector_asset = model_assets.get("detector") or {}
         asset_note = f" Resolved model path: {detector_asset.get('path')}." if detector_asset.get("path") else ""
-        warnings.append(f"{args.detector} inference integration is not installed in this lightweight CaptionHelper checkout; detector prompts were prepared for an external implementation.{asset_note}")
+        detector_loaded = (model_load_status.get("detector") or {}).get("loaded")
+        if not detector_loaded:
+            warnings.append(f"{args.detector} preprocessing was skipped because the detector runtime/model did not load.{asset_note}")
     if args.segmenter != "none":
         segmenter_asset = model_assets.get("segmenter") or {}
         asset_note = f" Resolved model path: {segmenter_asset.get('path')}." if segmenter_asset.get("path") else ""

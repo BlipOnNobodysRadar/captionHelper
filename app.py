@@ -545,6 +545,42 @@ def _valid_ideogram_bbox(value)->bool:
     )
 
 
+def _region_preprocess_warnings(region_payload:dict|None)->list[str]:
+    if not isinstance(region_payload, dict):
+        return []
+    warnings = [str(item) for item in (region_payload.get("warnings") or []) if str(item).strip()]
+    if region_payload.get("error"):
+        warnings.insert(0, str(region_payload["error"]))
+    return warnings
+
+
+def _region_preprocess_summary(region_payload:dict|None)->dict:
+    warnings = _region_preprocess_warnings(region_payload)
+    if not isinstance(region_payload, dict):
+        return {"enabled": False, "warnings": warnings, "skipped": False}
+    candidates = len(region_payload.get("regions") or []) + len(region_payload.get("ocr") or [])
+    selected = [
+        region_payload.get("detector"),
+        region_payload.get("segmenter"),
+        region_payload.get("ocr_engine"),
+    ]
+    selected = [item for item in selected if item and item != "none"]
+    model_load_status = region_payload.get("model_load_status") or {}
+    failed_loads = [
+        name
+        for name, status in model_load_status.items()
+        if isinstance(status, dict) and status.get("loaded") is False
+    ]
+    skipped = bool(selected) and candidates == 0 and bool(warnings or failed_loads)
+    return {
+        "enabled": True,
+        "skipped": skipped,
+        "candidate_count": candidates,
+        "warnings": warnings,
+        "failed_model_loads": failed_loads,
+    }
+
+
 def _llamacpp_management_root_url()->str:
     if LLAMA_CPP_MODEL_MANAGEMENT_BASE_URL:
         return LLAMA_CPP_MODEL_MANAGEMENT_BASE_URL.rstrip("/")
@@ -1064,7 +1100,8 @@ def chat_caption():
             model_management = {"unload_before_preprocess": unload_result, "reload_after_preprocess": reload_result}
             user_prompt = _augment_prompt_with_region_candidates(user_prompt, region_payload)
         caption, caption_meta = _caption_with_validation(imgs, system_prompt_in, model, prefill, media_kind, max_output_tokens, user_prompt, validate_json=validate_ideogram_json)
-        return jsonify({"caption": caption, "frames_used": len(imgs), "region_preprocess": region_payload, "model_management": model_management, **caption_meta})
+        preprocess_summary = _region_preprocess_summary(region_payload) if enable_region_preprocess else {"enabled": False, "warnings": [], "skipped": False}
+        return jsonify({"caption": caption, "frames_used": len(imgs), "region_preprocess": region_payload, "region_preprocess_summary": preprocess_summary, "model_management": model_management, **caption_meta})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     finally:
@@ -1306,6 +1343,7 @@ def _process_one_target(fn:str, params:dict):
 
         caption, caption_meta = _caption_with_validation(imgs, system_prompt_in, model, prefill, media_kind, max_output_tokens, user_prompt, validate_json=validate_ideogram_json)
         validation = caption_meta.get("validation") or {}
+        preprocess_summary = _region_preprocess_summary(region_payload) if enable_region_preprocess else {"enabled": False, "warnings": [], "skipped": False}
 
         os.makedirs(output_paths["dir"], exist_ok=True)
         _copy_media_if_needed(in_path, output_paths, overwrite)
@@ -1325,6 +1363,7 @@ def _process_one_target(fn:str, params:dict):
                 "temperature": 0.2,
             },
             "region_proposal": region_payload,
+            "region_preprocess_summary": preprocess_summary,
             "llama_cpp_model_management": model_management,
             "region_candidates_used_in_prompt": _region_candidates_for_prompt(region_payload),
             "final_validation_result": validation,
@@ -1335,7 +1374,7 @@ def _process_one_target(fn:str, params:dict):
         meta_path = _metadata_path_for_caption(out_txt)
         if validate_ideogram_json and not validation.get("valid"):
             _write_caption_metadata(meta_path, metadata_payload)
-            return {"file": fn, "ok": False, "error": "Caption failed Ideogram JSON validation after retry", "validation_errors": validation.get("errors", []), "metadata_out": os.path.relpath(meta_path, folder)}
+            return {"file": fn, "ok": False, "error": "Caption failed Ideogram JSON validation after retry", "validation_errors": validation.get("errors", []), "metadata_out": os.path.relpath(meta_path, folder), "region_preprocess_summary": preprocess_summary}
 
         if os.path.exists(out_txt) and prepend_existing:
             try:
@@ -1357,6 +1396,7 @@ def _process_one_target(fn:str, params:dict):
             "out": os.path.relpath(out_txt, folder),
             "media_out": os.path.relpath(output_paths["media"], folder) if output_paths.get("needs_media_copy") else None,
             "metadata_out": os.path.relpath(meta_path, folder),
+            "region_preprocess_summary": preprocess_summary,
         }
     except VisionAPIRequestError as e:
         out = {"file": fn, "ok": False, "error": str(e), "server_error": True}
