@@ -97,6 +97,7 @@ REGION_PREPROCESS_MAX_REGIONS = int(_env_first("CAPTION_REGION_MAX_REGIONS", def
 REGION_PREPROCESS_OCR_THRESHOLD = float(_env_first("CAPTION_REGION_OCR_THRESHOLD", default="0.55"))
 REGION_PREPROCESS_DETECTOR_BOX_THRESHOLD = float(_env_first("CAPTION_REGION_DETECTOR_BOX_THRESHOLD", default="0.30"))
 REGION_PREPROCESS_DETECTOR_TEXT_THRESHOLD = float(_env_first("CAPTION_REGION_DETECTOR_TEXT_THRESHOLD", default="0.25"))
+REGION_PREPROCESS_DEVICE = _env_first("CAPTION_REGION_DEVICE", default="auto").strip().lower()
 REGION_PREPROCESS_MODEL_ROOT = _env_first("CAPTION_REGION_MODEL_ROOT", default=os.path.join(os.path.expanduser("~"), ".cache", "captionhelper", "vision_models"))
 REGION_PREPROCESS_AUTO_DOWNLOAD = str(_env_first("CAPTION_REGION_AUTO_DOWNLOAD", default="true")).strip().lower() in {"1", "true", "yes", "on"}
 REGION_PREPROCESS_LOAD_MODELS = str(_env_first("CAPTION_REGION_LOAD_MODELS", default="true")).strip().lower() in {"1", "true", "yes", "on"}
@@ -489,6 +490,9 @@ def _run_region_preprocess(image_path:str, tags_text:str="", source_caption_path
     ocr_threshold = float(params.get("region_ocr_threshold", REGION_PREPROCESS_OCR_THRESHOLD))
     detector_box_threshold = float(params.get("region_detector_box_threshold", REGION_PREPROCESS_DETECTOR_BOX_THRESHOLD))
     detector_text_threshold = float(params.get("region_detector_text_threshold", REGION_PREPROCESS_DETECTOR_TEXT_THRESHOLD))
+    region_device = str(params.get("region_device") or REGION_PREPROCESS_DEVICE)
+    if region_device not in {"auto", "cuda", "cpu"}:
+        region_device = "auto"
     model_root = str(params.get("region_model_root") or REGION_PREPROCESS_MODEL_ROOT)
     auto_download = bool(params.get("region_auto_download", REGION_PREPROCESS_AUTO_DOWNLOAD))
     load_models = bool(params.get("region_load_models", REGION_PREPROCESS_LOAD_MODELS))
@@ -515,6 +519,7 @@ def _run_region_preprocess(image_path:str, tags_text:str="", source_caption_path
         "--ocr-threshold", str(ocr_threshold),
         "--detector-box-threshold", str(detector_box_threshold),
         "--detector-text-threshold", str(detector_text_threshold),
+        "--device", region_device,
     ]
     if not auto_download:
         cmd.append("--no-auto-download")
@@ -626,8 +631,6 @@ def _llamacpp_management_root_url()->str:
 def _llamacpp_router_model_action(action:str, model:str)->dict:
     if BACKEND != "llamacpp":
         return {"ok": False, "skipped": True, "reason": "backend is not llama.cpp"}
-    if LLAMA_CPP_MODEL_MANAGEMENT not in {"router", "llamacpp-router"}:
-        return {"ok": False, "skipped": True, "reason": "llama.cpp router model management is disabled"}
     if not model:
         return {"ok": False, "skipped": True, "reason": "no model configured"}
     url = f"{_llamacpp_management_root_url()}/models/{action}"
@@ -653,7 +656,7 @@ def _llamacpp_router_model_action(action:str, model:str)->dict:
 
 
 def _maybe_unload_llamacpp_for_preprocess(model:str, enabled:bool)->dict|None:
-    if not enabled or not LLAMA_CPP_UNLOAD_DURING_PREPROCESS:
+    if not enabled:
         return None
     return _llamacpp_router_model_action("unload", model or DEFAULT_MODEL)
 
@@ -990,6 +993,7 @@ def api_config():
             "ocr_threshold": REGION_PREPROCESS_OCR_THRESHOLD,
             "detector_box_threshold": REGION_PREPROCESS_DETECTOR_BOX_THRESHOLD,
             "detector_text_threshold": REGION_PREPROCESS_DETECTOR_TEXT_THRESHOLD,
+            "device": REGION_PREPROCESS_DEVICE,
             "model_root": REGION_PREPROCESS_MODEL_ROOT,
             "auto_download": REGION_PREPROCESS_AUTO_DOWNLOAD,
             "load_models": REGION_PREPROCESS_LOAD_MODELS,
@@ -1113,7 +1117,8 @@ def chat_caption():
         region_payload = None
         model_management = None
         if image_mode and enable_region_preprocess:
-            unload_result = _maybe_unload_llamacpp_for_preprocess(model, enabled=True)
+            unload_enabled = request.form.get("llama_cpp_unload_during_preprocess", str(LLAMA_CPP_UNLOAD_DURING_PREPROCESS)).lower() in ("1","true","yes","on")
+            unload_result = _maybe_unload_llamacpp_for_preprocess(model, enabled=unload_enabled)
             region_payload = _run_region_preprocess(
                 upload_path,
                 tags_text=_detector_tags_from_context(context),
@@ -1126,6 +1131,7 @@ def chat_caption():
                     "region_ocr_threshold": request.form.get("region_ocr_threshold") or REGION_PREPROCESS_OCR_THRESHOLD,
                     "region_detector_box_threshold": request.form.get("region_detector_box_threshold") or REGION_PREPROCESS_DETECTOR_BOX_THRESHOLD,
                     "region_detector_text_threshold": request.form.get("region_detector_text_threshold") or REGION_PREPROCESS_DETECTOR_TEXT_THRESHOLD,
+                    "region_device": request.form.get("region_device") or REGION_PREPROCESS_DEVICE,
                     "region_model_root": request.form.get("region_model_root") or REGION_PREPROCESS_MODEL_ROOT,
                     "region_auto_download": request.form.get("region_auto_download","true").lower() in ("1","true","yes","on"),
                     "region_load_models": request.form.get("region_load_models","true").lower() in ("1","true","yes","on"),
@@ -1373,7 +1379,7 @@ def _process_one_target(fn:str, params:dict):
         region_payload = None
         model_management = None
         if image_mode and enable_region_preprocess:
-            unload_result = _maybe_unload_llamacpp_for_preprocess(model, enabled=True)
+            unload_result = _maybe_unload_llamacpp_for_preprocess(model, enabled=bool(params.get("llama_cpp_unload_during_preprocess", LLAMA_CPP_UNLOAD_DURING_PREPROCESS)))
             def progress_callback(progress:dict):
                 job_id = params.get("job_id")
                 if not job_id:
@@ -1423,7 +1429,7 @@ def _process_one_target(fn:str, params:dict):
         meta_path = _metadata_path_for_caption(out_txt)
         if validate_ideogram_json and not validation.get("valid"):
             _write_caption_metadata(meta_path, metadata_payload)
-            return {"file": fn, "ok": False, "error": "Caption failed Ideogram JSON validation after retry", "validation_errors": validation.get("errors", []), "metadata_out": os.path.relpath(meta_path, folder), "region_preprocess_summary": preprocess_summary}
+            return {"file": fn, "ok": False, "error": "Caption failed Ideogram JSON validation after retry", "validation_errors": validation.get("errors", []), "metadata_out": os.path.relpath(meta_path, folder), "region_preprocess_summary": preprocess_summary, "model_management": model_management}
 
         if os.path.exists(out_txt) and prepend_existing:
             try:
@@ -1446,6 +1452,7 @@ def _process_one_target(fn:str, params:dict):
             "media_out": os.path.relpath(output_paths["media"], folder) if output_paths.get("needs_media_copy") else None,
             "metadata_out": os.path.relpath(meta_path, folder),
             "region_preprocess_summary": preprocess_summary,
+            "model_management": model_management,
         }
     except VisionAPIRequestError as e:
         out = {"file": fn, "ok": False, "error": str(e), "server_error": True}
@@ -1616,6 +1623,7 @@ def batch_start():
     validate_ideogram_json = bool(data.get("validate_ideogram_json", False))
     region_auto_download = bool(data.get("region_auto_download", REGION_PREPROCESS_AUTO_DOWNLOAD))
     region_load_models = bool(data.get("region_load_models", REGION_PREPROCESS_LOAD_MODELS))
+    llama_cpp_unload_during_preprocess = bool(data.get("llama_cpp_unload_during_preprocess", LLAMA_CPP_UNLOAD_DURING_PREPROCESS))
 
     job_id = uuid.uuid4().hex
     params = {
@@ -1648,12 +1656,14 @@ def batch_start():
         "region_ocr_threshold": float(data.get("region_ocr_threshold", REGION_PREPROCESS_OCR_THRESHOLD)),
         "region_detector_box_threshold": float(data.get("region_detector_box_threshold", REGION_PREPROCESS_DETECTOR_BOX_THRESHOLD)),
         "region_detector_text_threshold": float(data.get("region_detector_text_threshold", REGION_PREPROCESS_DETECTOR_TEXT_THRESHOLD)),
+        "region_device": data.get("region_device") or REGION_PREPROCESS_DEVICE,
         "region_model_root": data.get("region_model_root") or REGION_PREPROCESS_MODEL_ROOT,
         "region_auto_download": region_auto_download,
         "region_load_models": region_load_models,
         "region_detector_model_path": data.get("region_detector_model_path") or REGION_PREPROCESS_DETECTOR_MODEL_PATH,
         "region_segmenter_model_path": data.get("region_segmenter_model_path") or REGION_PREPROCESS_SEGMENTER_MODEL_PATH,
         "region_ocr_model_path": data.get("region_ocr_model_path") or REGION_PREPROCESS_OCR_MODEL_PATH,
+        "llama_cpp_unload_during_preprocess": llama_cpp_unload_during_preprocess,
     }
 
     with JOBS_LOCK:

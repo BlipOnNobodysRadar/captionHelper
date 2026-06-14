@@ -201,6 +201,7 @@ async function loadBackendConfig() {
       const regionOcrThreshold = document.getElementById('regionOcrThreshold');
       const regionDetectorBoxThreshold = document.getElementById('regionDetectorBoxThreshold');
       const regionDetectorTextThreshold = document.getElementById('regionDetectorTextThreshold');
+      const regionDevice = document.getElementById('regionDevice');
       const regionModelRoot = document.getElementById('regionModelRoot');
       const regionAutoDownload = document.getElementById('regionAutoDownload');
       const regionLoadModels = document.getElementById('regionLoadModels');
@@ -214,12 +215,17 @@ async function loadBackendConfig() {
       if (regionOcrThreshold) regionOcrThreshold.value = cfg.region_preprocess.ocr_threshold ?? regionOcrThreshold.value;
       if (regionDetectorBoxThreshold) regionDetectorBoxThreshold.value = cfg.region_preprocess.detector_box_threshold ?? regionDetectorBoxThreshold.value;
       if (regionDetectorTextThreshold) regionDetectorTextThreshold.value = cfg.region_preprocess.detector_text_threshold ?? regionDetectorTextThreshold.value;
+      if (regionDevice) regionDevice.value = cfg.region_preprocess.device || regionDevice.value;
       if (regionModelRoot) regionModelRoot.value = cfg.region_preprocess.model_root || '';
       if (regionAutoDownload) regionAutoDownload.checked = Boolean(cfg.region_preprocess.auto_download);
       if (regionLoadModels) regionLoadModels.checked = Boolean(cfg.region_preprocess.load_models);
       if (regionDetectorModelPath) regionDetectorModelPath.value = cfg.region_preprocess.detector_model_path || '';
       if (regionSegmenterModelPath) regionSegmenterModelPath.value = cfg.region_preprocess.segmenter_model_path || '';
       if (regionOcrModelPath) regionOcrModelPath.value = cfg.region_preprocess.ocr_model_path || '';
+    }
+    const llamaUnload = document.getElementById('llamaCppUnloadDuringPreprocess');
+    if (llamaUnload && cfg.llama_cpp_model_management) {
+      llamaUnload.checked = Boolean(cfg.llama_cpp_model_management.unload_during_preprocess);
     }
 
     populatePresets(cfg.caption_presets);
@@ -262,6 +268,20 @@ function formatRegionPreprocessNotice(summary) {
   return `${prefix}\n${warnings.map(w => `• ${w}`).join('\n')}`;
 }
 
+function formatModelManagementNotice(modelManagement) {
+  if (!modelManagement) return '';
+  const unload = modelManagement.unload_before_preprocess;
+  const reload = modelManagement.reload_after_preprocess;
+  const lines = [];
+  if (unload && !unload.ok) {
+    lines.push(`⚠️ llama.cpp model unload did not happen: ${unload.reason || unload.error || 'unknown error'}`);
+  }
+  if (reload && !reload.ok) {
+    lines.push(`⚠️ llama.cpp model reload did not complete: ${reload.reason || reload.error || 'unknown error'}`);
+  }
+  return lines.join('\n');
+}
+
 async function postChatCaption(file) {
   const fd = new FormData();
   fd.append('file', file);
@@ -281,12 +301,14 @@ async function postChatCaption(file) {
   fd.append('region_ocr_threshold', document.getElementById('regionOcrThreshold').value);
   fd.append('region_detector_box_threshold', document.getElementById('regionDetectorBoxThreshold').value);
   fd.append('region_detector_text_threshold', document.getElementById('regionDetectorTextThreshold').value);
+  fd.append('region_device', document.getElementById('regionDevice').value);
   fd.append('region_model_root', document.getElementById('regionModelRoot').value);
   fd.append('region_auto_download', document.getElementById('regionAutoDownload').checked);
   fd.append('region_load_models', document.getElementById('regionLoadModels').checked);
   fd.append('region_detector_model_path', document.getElementById('regionDetectorModelPath').value);
   fd.append('region_segmenter_model_path', document.getElementById('regionSegmenterModelPath').value);
   fd.append('region_ocr_model_path', document.getElementById('regionOcrModelPath').value);
+  fd.append('llama_cpp_unload_during_preprocess', document.getElementById('llamaCppUnloadDuringPreprocess').checked);
   fd.append('use_existing_caption', document.getElementById('useExistingCaption').checked);
   fd.append('existing_caption', document.getElementById('existingCaption').value);
   appendMetadataFields(fd);
@@ -311,7 +333,9 @@ sendBtn.addEventListener('click', async () => {
   } else {
     const framesInfo = (typeof out.frames_used === 'number') ? ` [inputs: ${out.frames_used}] ` : ' ';
     const preprocessNotice = formatRegionPreprocessNotice(out.region_preprocess_summary);
-    addMsg('assistant', (preprocessNotice ? preprocessNotice + '\n\n' : '') + framesInfo + out.caption);
+    const modelNotice = formatModelManagementNotice(out.model_management);
+    const notices = [preprocessNotice, modelNotice].filter(Boolean).join('\n\n');
+    addMsg('assistant', (notices ? notices + '\n\n' : '') + framesInfo + out.caption);
   }
 });
 
@@ -391,12 +415,14 @@ function getBatchBody() {
     region_ocr_threshold: Number(document.getElementById('regionOcrThreshold').value),
     region_detector_box_threshold: Number(document.getElementById('regionDetectorBoxThreshold').value),
     region_detector_text_threshold: Number(document.getElementById('regionDetectorTextThreshold').value),
+    region_device: document.getElementById('regionDevice').value,
     region_model_root: document.getElementById('regionModelRoot').value,
     region_auto_download: document.getElementById('regionAutoDownload').checked,
     region_load_models: document.getElementById('regionLoadModels').checked,
     region_detector_model_path: document.getElementById('regionDetectorModelPath').value,
     region_segmenter_model_path: document.getElementById('regionSegmenterModelPath').value,
     region_ocr_model_path: document.getElementById('regionOcrModelPath').value,
+    llama_cpp_unload_during_preprocess: document.getElementById('llamaCppUnloadDuringPreprocess').checked,
     max_concurrent: Number(document.getElementById('maxConcurrent').value),
     abort_after_server_errors: Number(document.getElementById('abortAfterServerErrors').value),
     sampling_type: document.getElementById('samplingType').value,
@@ -453,6 +479,8 @@ async function pollProgress() {
           logBatch(`✓ ${r.file} -> ${r.out}${mediaOut}${took}`);
           const notice = formatRegionPreprocessNotice(r.region_preprocess_summary);
           if (notice) logBatch(notice);
+          const modelNotice = formatModelManagementNotice(r.model_management);
+          if (modelNotice) logBatch(modelNotice);
         }
         else if (r.skipped) logBatch(`↷ ${r.file} (skipped: ${r.reason})${took}`);
         else {
@@ -460,6 +488,8 @@ async function pollProgress() {
           logBatch(`✗ ${r.file}${code}: ${r.error}${took}`);
           const notice = formatRegionPreprocessNotice(r.region_preprocess_summary);
           if (notice) logBatch(notice);
+          const modelNotice = formatModelManagementNotice(r.model_management);
+          if (modelNotice) logBatch(modelNotice);
         }
       }
       lastResultCount = out.results.length;

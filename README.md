@@ -297,6 +297,8 @@ The lightweight checked-in `vision_preprocess.py` provides the orchestration con
 
 GroundingDINO selections run through the `transformers` zero-shot object detection pipeline when the model and runtime load successfully. If GroundingDINO runs but returns zero candidates, lower the detector box/text thresholds in the UI and/or add simpler object prompts/tags.
 
+If GroundingDINO fails with CUDA out-of-memory while Gemma is loaded in a separate classic `llama-server -m ...` process, either run llama.cpp in router mode and enable the router unload/reload checkbox, or set **Preprocessing device** to CPU. CPU preprocessing is slower but avoids competing for VRAM with the caption model.
+
 For selected detector/segmenter/OCR models, the preprocessor resolves assets in this order:
 
 1. A user-supplied model path or directory, when provided in the UI or via CLI.
@@ -335,7 +337,7 @@ When region preprocessing is enabled, CaptionHelper also validates the final res
 
 ### llama.cpp VRAM handoff during preprocessing
 
-The preprocessor can download/resolve detector and segmenter weights, but loading those models is separate from unloading Gemma in llama.cpp. A classic `llama-server -m gemma.gguf` process does not expose a general unload/reload endpoint for its single bound model. To free VRAM while GroundingDINO/SAM2/PaddleOCR run, start a recent llama.cpp server in **router mode** and enable CaptionHelper's router handoff:
+The preprocessor can download/resolve detector and segmenter weights, but loading those models is separate from unloading Gemma in llama.cpp. A classic `llama-server -m gemma.gguf` process does not expose a general unload/reload endpoint for its single bound model. To free VRAM while GroundingDINO/SAM2/PaddleOCR run, start a recent llama.cpp server in **router mode** and enable CaptionHelper's router handoff from the UI or environment:
 
 ```bash
 CAPTION_LLAMA_CPP_MODEL_MANAGEMENT=router \

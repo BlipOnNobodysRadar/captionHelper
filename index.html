@@ -133,6 +133,18 @@
             <small style="color:#8a90a6">Lower these if GroundingDINO runs but returns zero candidates.</small>
           </div>
           <div class="row">
+            <label>Preprocessing device:</label>
+            <select id="regionDevice">
+              <option value="auto" selected>auto (CUDA if available)</option>
+              <option value="cuda">CUDA</option>
+              <option value="cpu">CPU (slower, avoids VRAM conflicts)</option>
+            </select>
+          </div>
+          <div class="row">
+            <label><input type="checkbox" id="llamaCppUnloadDuringPreprocess"> Try llama.cpp router unload/reload during preprocessing</label>
+            <small style="color:#8a90a6">Requires llama.cpp router model-management endpoints. A classic single-model llama-server cannot unload its GGUF without being stopped or run through router mode.</small>
+          </div>
+          <div class="row">
             <label>Model root:</label>
             <input id="regionModelRoot" placeholder="~/.cache/captionhelper/vision_models">
             <small style="color:#8a90a6">Expected local repo cache for downloaded or manually staged preprocessing models.</small>

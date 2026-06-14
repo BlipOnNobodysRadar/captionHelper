@@ -446,6 +446,7 @@ def run_groundingdino_detector(
     auto_download: bool,
     box_threshold: float,
     text_threshold: float,
+    device_preference: str = "auto",
     progress_out: str = "",
 ) -> tuple[list[RegionCandidate], dict[str, Any], list[str]]:
     """Run GroundingDINO through transformers and return object candidates."""
@@ -484,7 +485,12 @@ def run_groundingdino_detector(
             image = im.convert("RGB")
         processor = AutoProcessor.from_pretrained(ref, local_files_only=not auto_download)
         model = AutoModelForZeroShotObjectDetection.from_pretrained(ref, local_files_only=not auto_download)
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        if device_preference == "cpu":
+            device = "cpu"
+        elif device_preference == "cuda":
+            device = "cuda"
+        else:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
         model = model.to(device)
         labels = [p.strip().lower() for p in prompts if p.strip()][:48]
         text_prompt = ". ".join(labels)
@@ -546,7 +552,10 @@ def run_groundingdino_detector(
             )
     except Exception as exc:
         diagnostics["error"] = str(exc)
-        warnings.append(f"GroundingDINO detection failed: {exc}")
+        hint = ""
+        if "out of memory" in str(exc).lower() or "cuda" in str(exc).lower() and "memory" in str(exc).lower():
+            hint = " Try enabling llama.cpp router unload/reload, lowering batch concurrency, or setting preprocessing device to CPU."
+        warnings.append(f"GroundingDINO detection failed: {exc}{hint}")
     return candidates, diagnostics, warnings
 
 
@@ -637,6 +646,7 @@ def main() -> int:
     parser.add_argument("--iou-threshold", type=float, default=0.65)
     parser.add_argument("--detector-box-threshold", type=float, default=0.30)
     parser.add_argument("--detector-text-threshold", type=float, default=0.25)
+    parser.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     args = parser.parse_args()
 
     with Image.open(args.image) as im:
@@ -691,6 +701,7 @@ def main() -> int:
                 auto_download=args.auto_download,
                 box_threshold=args.detector_box_threshold,
                 text_threshold=args.detector_text_threshold,
+                device_preference=args.device,
                 progress_out=args.progress_out,
             )
             regions.extend(detected_regions)
@@ -719,6 +730,7 @@ def main() -> int:
         "model_root": _expand_path(args.model_root),
         "auto_download": args.auto_download,
         "load_models": args.load_models,
+        "device": args.device,
         "model_assets": model_assets,
         "model_load_status": model_load_status,
         "detector_prompts": prompts,
