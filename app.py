@@ -1044,7 +1044,12 @@ def _caption_with_validation(imgs, system_prompt, model, prefill, media_kind, ma
         retried = True
         caption = call_vision_api(imgs, system_prompt, model, prefill=prefill, media_kind=media_kind, max_output_tokens=max_output_tokens, user_prompt=retry_prompt)
         validation = validate_ideogram4_json_caption(caption)
-    return caption, {"validation": validation, "retried": retried}
+    return caption, {
+        "validation": validation,
+        "retried": retried,
+        "prompt_used": retry_prompt if retried else user_prompt,
+        "initial_user_prompt": user_prompt,
+    }
 
 # ------------------ Simple chat route ------------------
 @app.route("/")
@@ -1236,7 +1241,8 @@ def chat_caption():
             user_prompt = _augment_prompt_with_region_candidates(user_prompt, region_payload)
         caption, caption_meta = _caption_with_validation(imgs, system_prompt_in, model, prefill, media_kind, max_output_tokens, user_prompt, validate_json=validate_ideogram_json)
         preprocess_summary = _region_preprocess_summary(region_payload) if enable_region_preprocess else {"enabled": False, "warnings": [], "skipped": False}
-        return jsonify({"caption": caption, "frames_used": len(imgs), "region_preprocess": region_payload, "region_preprocess_summary": preprocess_summary, "model_management": model_management, **caption_meta})
+        public_caption_meta = {k: v for k, v in caption_meta.items() if k not in ("prompt_used", "initial_user_prompt")}
+        return jsonify({"caption": caption, "frames_used": len(imgs), "region_preprocess": region_payload, "region_preprocess_summary": preprocess_summary, "model_management": model_management, **public_caption_meta})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     finally:
@@ -1408,6 +1414,55 @@ def _write_caption_metadata(path:str, payload:dict)->None:
         fh.write("\n")
 
 
+def _review_training_metadata(
+    raw_model_output:str,
+    source_caption_or_tags:str,
+    region_payload:dict|None,
+    region_candidates:list[dict],
+    prompt_version:str,
+    model:str,
+    system_prompt:str,
+    user_prompt:str,
+    prefill:str,
+    media_kind:str,
+    visual_input_count:int,
+)->dict:
+    normalized_prompts = None
+    raw_detector_text = None
+    if isinstance(region_payload, dict):
+        raw_detector_text = region_payload.get("raw_detector_text")
+        normalized_prompts = region_payload.get("normalized_detector_prompts") or region_payload.get("detector_prompts")
+
+    model_input_prompt = {
+        "system_prompt": (system_prompt or "").strip(),
+        "user_prompt": user_prompt or "",
+        "assistant_prefill": prefill or "",
+        "media_kind": media_kind,
+        "visual_input_count": visual_input_count,
+        "visual_inputs_omitted": True,
+    }
+
+    return {
+        "raw_model_output": raw_model_output,
+        "model_input_prompt": model_input_prompt,
+        "manual_fixed_output": None,
+        "manual_reviewed": False,
+        "manual_reviewed_at": None,
+        "review_notes": "",
+        "training_record_version": "captionhelper-review-v1",
+        "training_input": {
+            "source_caption_or_tags": source_caption_or_tags or "",
+            "raw_detector_text": raw_detector_text,
+            "normalized_detector_prompts": normalized_prompts,
+            "region_candidates_used_in_prompt": region_candidates,
+            "prompt_version": prompt_version,
+            "model": model or DEFAULT_MODEL,
+            "model_backend": BACKEND_DISPLAY_NAME,
+            "model_input_prompt": model_input_prompt,
+        },
+    }
+
+
 def _select_targets(folder:str, image_mode:bool):
     def is_processable_file(name:str)->bool:
         path = os.path.join(folder, name)
@@ -1523,6 +1578,10 @@ def _process_one_target(fn:str, params:dict):
         caption, caption_meta = _caption_with_validation(imgs, system_prompt_in, model, prefill, media_kind, max_output_tokens, user_prompt, validate_json=validate_ideogram_json)
         validation = caption_meta.get("validation") or {}
         preprocess_summary = _region_preprocess_summary(region_payload) if enable_region_preprocess else {"enabled": False, "warnings": [], "skipped": False}
+        prompt_version = "captionhelper-region-proposal-v1"
+        effective_model = model or DEFAULT_MODEL
+        source_caption_or_tags = old_text or context.get("source_tags") or _detector_tags_from_context(context)
+        region_candidates_used_in_prompt = _region_candidates_for_prompt(region_payload)
 
         os.makedirs(output_paths["dir"], exist_ok=True)
         _copy_media_if_needed(in_path, output_paths, overwrite)
@@ -1532,9 +1591,9 @@ def _process_one_target(fn:str, params:dict):
             "image_hash": _sha256_file(in_path) if image_mode else None,
             "source_caption_path": source_txt if os.path.exists(source_txt) else None,
             "final_caption_path": out_txt,
-            "prompt_version": "captionhelper-region-proposal-v1",
+            "prompt_version": prompt_version,
             "model_backend": BACKEND_DISPLAY_NAME,
-            "model": model or DEFAULT_MODEL,
+            "model": effective_model,
             "llama_cpp_settings": {
                 "api_base_url": API_BASE_URL,
                 "max_image_side": max_image_side,
@@ -1544,12 +1603,25 @@ def _process_one_target(fn:str, params:dict):
             "region_proposal": region_payload,
             "region_preprocess_summary": preprocess_summary,
             "llama_cpp_model_management": model_management,
-            "region_candidates_used_in_prompt": _region_candidates_for_prompt(region_payload),
+            "region_candidates_used_in_prompt": region_candidates_used_in_prompt,
             "final_validation_result": validation,
             "validation_retried": bool(caption_meta.get("retried")),
-            "manual_reviewed": False,
         }
-        metadata_payload = {k: v for k, v in metadata_payload.items() if v is not None}
+        metadata_payload.update(_review_training_metadata(
+            raw_model_output=caption,
+            source_caption_or_tags=source_caption_or_tags,
+            region_payload=region_payload,
+            region_candidates=region_candidates_used_in_prompt,
+            prompt_version=prompt_version,
+            model=effective_model,
+            system_prompt=system_prompt_in,
+            user_prompt=caption_meta.get("prompt_used") or user_prompt,
+            prefill=prefill,
+            media_kind=media_kind,
+            visual_input_count=len(imgs),
+        ))
+        nullable_review_fields = {"manual_fixed_output", "manual_reviewed_at"}
+        metadata_payload = {k: v for k, v in metadata_payload.items() if v is not None or k in nullable_review_fields}
         meta_path = _metadata_path_for_caption(out_txt)
         if validate_ideogram_json and not validation.get("valid"):
             _write_caption_metadata(meta_path, metadata_payload)
