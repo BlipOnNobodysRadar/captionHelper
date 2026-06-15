@@ -51,6 +51,15 @@ body {
 .card input, .card textarea, .card select {
   width: 100%; padding: 8px; border-radius: 6px; border: 1px solid var(--border); background: #0d0f16; color: #d7d9e0;
 }
+.inline-fields {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.inline-fields > input,
+.inline-fields > select {
+  flex: 1 1 9rem;
+}
 small { font-size: 11px; }
 
 .log {
