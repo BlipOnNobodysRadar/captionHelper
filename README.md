@@ -167,7 +167,7 @@ Selecting a preset fills both editable prompt fields:
 - **System prompt** controls the static model behavior.
 - **User message template** controls the per-request message sent with the image or video frames. Use `[image]` where visual inputs should be inserted.
 
-After editing a preset, use **Save as user preset** to store it in `user_presets.json`. This file is ignored by git so local prompt experiments, private templates, and dataset-specific presets are not committed. Set `CAPTION_USER_PRESETS_PATH=/path/to/presets.json` if you want to keep the file elsewhere. User presets can be selected like built-in presets and deleted from the UI.
+After editing a preset, use **Save as user preset** to store it in `user_presets.json`. User presets can include local model paths, dataset paths, output settings, checkbox states, and prompt metadata, so `user_presets*.json` files are ignored by git to keep local prompt experiments, private templates, and dataset-specific paths out of commits. Set `CAPTION_USER_PRESETS_PATH=/path/to/presets.json` if you want to keep the file elsewhere; if that path lives inside a git repository, add it to that repository's `.gitignore` before saving presets there. User presets can be selected like built-in presets and deleted from the UI.
 
 The template can use these placeholders, and lines containing only empty placeholders are omitted automatically:
 
