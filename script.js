@@ -660,3 +660,168 @@ cancelBtn.addEventListener('click', async () => {
     cancelBtn.disabled = false;
   }
 });
+
+// ---- Experimental AI-assisted caption edit ----
+let aiDefaultPromptTemplate = '';
+let pendingAiCaption = null;
+
+function aiEl(id) { return document.getElementById(id); }
+
+function setAiStatus(message, isError = false) {
+  const status = aiEl('aiStatus');
+  if (!status) return;
+  status.textContent = message || '';
+  status.classList.toggle('error', Boolean(isError));
+}
+
+function isLocalAiUrl(rawUrl) {
+  try {
+    const url = new URL(rawUrl || '', window.location.href);
+    return ['localhost', '127.0.0.1', '::1'].includes(url.hostname);
+  } catch (_) {
+    return false;
+  }
+}
+
+function refreshAiPrivacyWarning() {
+  const warning = aiEl('aiPrivacyWarning');
+  const baseUrl = aiEl('aiBaseUrl');
+  if (!warning || !baseUrl) return;
+  warning.textContent = isLocalAiUrl(baseUrl.value) ? '' : 'Warning: this backend URL is not localhost; images/captions will be sent to the configured non-local host.';
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error || new Error('Failed to read image'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function parseCurrentCaptionJson() {
+  const raw = aiEl('existingCaption')?.value || '';
+  if (!raw.trim()) throw new Error('Paste the current caption JSON into Existing caption first.');
+  return JSON.parse(raw);
+}
+
+function summarizeAiDiff(before, after) {
+  const lines = [];
+  const beforeElements = Array.isArray(before?.elements) ? before.elements : (before?.compositional_deconstruction?.elements || []);
+  const afterElements = Array.isArray(after?.elements) ? after.elements : (after?.compositional_deconstruction?.elements || []);
+  lines.push(`Elements: ${beforeElements.length} → ${afterElements.length}`);
+  if (afterElements.length > beforeElements.length) lines.push(`Added elements: ${afterElements.length - beforeElements.length}`);
+  if (afterElements.length < beforeElements.length) lines.push(`Removed elements: ${beforeElements.length - afterElements.length}`);
+  const changedBboxes = afterElements.filter((el, i) => JSON.stringify(el?.bbox) !== JSON.stringify(beforeElements[i]?.bbox)).length;
+  if (changedBboxes) lines.push(`Changed/new bboxes: ${changedBboxes}`);
+  for (const key of ['high_level_description', 'style_description', 'compositional_deconstruction', 'background']) {
+    if (JSON.stringify(before?.[key]) !== JSON.stringify(after?.[key])) lines.push(`Changed: ${key}`);
+  }
+  return lines.join('\n') || 'No obvious structural changes detected.';
+}
+
+function applyAiCaption() {
+  if (!pendingAiCaption) return;
+  const existing = aiEl('existingCaption');
+  if (existing) {
+    existing.value = JSON.stringify(pendingAiCaption, null, 2);
+    existing.dispatchEvent(new Event('input', {bubbles: true}));
+  }
+  setAiStatus('Applied AI result as an unsaved edit. Use normal save/export flow when ready.');
+  pendingAiCaption = null;
+  if (aiEl('aiApplyBtn')) aiEl('aiApplyBtn').disabled = true;
+  if (aiEl('aiDiscardBtn')) aiEl('aiDiscardBtn').disabled = true;
+}
+
+function discardAiCaption() {
+  pendingAiCaption = null;
+  if (aiEl('aiApplyBtn')) aiEl('aiApplyBtn').disabled = true;
+  if (aiEl('aiDiscardBtn')) aiEl('aiDiscardBtn').disabled = true;
+  setAiStatus('Discarded AI result.');
+}
+
+async function loadAiEditDefaults() {
+  if (!aiEl('aiPromptTemplate')) return;
+  try {
+    const res = await fetch('/api/ai-edit-defaults');
+    const out = await res.json();
+    aiDefaultPromptTemplate = out.prompt_template || '';
+    aiEl('aiPromptTemplate').value = localStorage.getItem('captionHelper.aiPromptTemplate') || aiDefaultPromptTemplate;
+    const settings = out.settings || {};
+    if (settings.base_url) aiEl('aiBaseUrl').value = settings.base_url;
+    if (settings.endpoint_path) aiEl('aiEndpointPath').value = settings.endpoint_path;
+    if (settings.model) aiEl('aiModel').value = settings.model;
+    refreshAiPrivacyWarning();
+  } catch (e) {
+    setAiStatus(`Could not load AI defaults: ${e.message || e}`, true);
+  }
+}
+
+async function askAiEdit() {
+  try {
+    setAiStatus('Preparing image, overlay, caption JSON, and prompt…');
+    pendingAiCaption = null;
+    const file = clipInput.files?.[0];
+    if (!file) throw new Error('Attach/select the current image first.');
+    if (!file.type.startsWith('image/')) throw new Error('AI Edit currently requires a still image.');
+    const beforeCaption = parseCurrentCaptionJson();
+    const imageDataUrl = await readFileAsDataUrl(file);
+    const promptTemplate = aiEl('aiPromptTemplate').value;
+    localStorage.setItem('captionHelper.aiPromptTemplate', promptTemplate);
+    const body = {
+      image_data_url: imageDataUrl,
+      filename: file.name,
+      caption: beforeCaption,
+      user_request: aiEl('aiEditRequest').value,
+      coordinate_format: aiEl('aiCoordinateFormat').value || 'yxyx',
+      coordinate_max: Number(aiEl('aiCoordinateMax').value || 1000),
+      selected_element_index: null,
+      settings: {
+        enabled: true,
+        base_url: aiEl('aiBaseUrl').value || 'http://localhost:8080',
+        endpoint_path: aiEl('aiEndpointPath').value || '/v1/chat/completions',
+        model: aiEl('aiModel').value || 'local-model',
+        max_tokens: Number(aiEl('aiMaxTokens').value || 8192),
+        temperature: Number(aiEl('aiTemperature').value || 0.1),
+        timeout_seconds: Number(aiEl('aiTimeout').value || 120),
+        send_original_image: aiEl('aiSendOriginal').checked,
+        send_overlay_image: aiEl('aiSendOverlay').checked,
+        overlay_max_side: 1280,
+        include_raw_json: true,
+        include_pretty_json: true,
+        include_prompt_template: true
+      },
+      prompt_template: promptTemplate
+    };
+    refreshAiPrivacyWarning();
+    const res = await fetch('/api/ai-edit-caption', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    });
+    const out = await res.json();
+    aiEl('aiRawResponse').textContent = out.raw_model_response || JSON.stringify(out, null, 2);
+    if (!res.ok || !out.ok) {
+      const details = out.validation?.errors?.length ? `\n${out.validation.errors.join('\n')}` : '';
+      throw new Error((out.error || `HTTP ${res.status}`) + details);
+    }
+    pendingAiCaption = out.caption;
+    aiEl('aiDiffSummary').textContent = summarizeAiDiff(beforeCaption, pendingAiCaption);
+    aiEl('aiApplyBtn').disabled = false;
+    aiEl('aiDiscardBtn').disabled = false;
+    setAiStatus('AI result is valid. Review it, then apply or discard.');
+    if (aiEl('aiApplyAutomatically').checked) applyAiCaption();
+  } catch (e) {
+    setAiStatus(`AI edit failed: ${e.message || e}`, true);
+  }
+}
+
+if (aiEl('aiAskBtn')) aiEl('aiAskBtn').addEventListener('click', askAiEdit);
+if (aiEl('aiApplyBtn')) aiEl('aiApplyBtn').addEventListener('click', applyAiCaption);
+if (aiEl('aiDiscardBtn')) aiEl('aiDiscardBtn').addEventListener('click', discardAiCaption);
+if (aiEl('aiResetPrompt')) aiEl('aiResetPrompt').addEventListener('click', () => {
+  aiEl('aiPromptTemplate').value = aiDefaultPromptTemplate;
+  localStorage.removeItem('captionHelper.aiPromptTemplate');
+});
+if (aiEl('aiBaseUrl')) aiEl('aiBaseUrl').addEventListener('input', refreshAiPrivacyWarning);
+loadAiEditDefaults();
