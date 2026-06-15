@@ -32,6 +32,16 @@ function setPresetStatus(message, isError = false) {
   presetStatus.classList.toggle('error', Boolean(isError));
 }
 
+function setFieldValue(id, value) {
+  const el = document.getElementById(id);
+  if (!el || value === undefined || value === null) return;
+  if (el.type === 'checkbox') {
+    el.checked = Boolean(value);
+  } else {
+    el.value = value;
+  }
+}
+
 function applyPreset(preset) {
   if (!preset) return;
   const systemPrompt = document.getElementById('systemPrompt');
@@ -46,6 +56,30 @@ function applyPreset(preset) {
   if (maxOutputTokens && Number.isFinite(Number(preset.max_output_tokens))) {
     maxOutputTokens.value = preset.max_output_tokens;
   }
+
+  const savedSettings = preset.saved_settings || {};
+  setFieldValue('modelName', savedSettings.model ?? preset.model);
+  setFieldValue('targetFolder', savedSettings.target_folder ?? preset.target_folder);
+  setFieldValue('numFrames', savedSettings.num_frames ?? preset.num_frames);
+  setFieldValue('samplingType', savedSettings.sampling_type ?? preset.sampling_type);
+  setFieldValue('maxImageSide', savedSettings.max_image_side ?? preset.max_image_side);
+  setFieldValue('maxConcurrent', savedSettings.max_concurrent ?? preset.max_concurrent);
+  setFieldValue('abortAfterServerErrors', savedSettings.abort_after_server_errors ?? preset.abort_after_server_errors);
+  setFieldValue('overwrite', savedSettings.overwrite ?? preset.overwrite);
+  setFieldValue('prependExisting', savedSettings.prepend_existing ?? preset.prepend_existing);
+  setFieldValue('filenameAffixText', savedSettings.filename_affix_text ?? preset.filename_affix_text);
+  setFieldValue('filenameAffixPosition', savedSettings.filename_affix_position ?? preset.filename_affix_position);
+  setFieldValue('outputToSubdir', savedSettings.output_to_subdir ?? preset.output_to_subdir);
+  setFieldValue('outputSubdirName', savedSettings.output_subdir_name ?? preset.output_subdir_name);
+  setFieldValue('useExistingCaption', savedSettings.use_existing_caption ?? preset.use_existing_caption);
+  setFieldValue('existingCaption', savedSettings.existing_caption ?? preset.existing_caption);
+  setFieldValue('sourceTags', savedSettings.source_tags ?? preset.source_tags);
+  setFieldValue('characterTags', savedSettings.character_tags ?? preset.character_tags);
+  setFieldValue('copyrightTags', savedSettings.copyright_tags ?? preset.copyright_tags);
+  setFieldValue('artistTags', savedSettings.artist_tags ?? preset.artist_tags);
+  setFieldValue('generalTags', savedSettings.general_tags ?? preset.general_tags);
+  setFieldValue('ratingTags', savedSettings.rating_tags ?? preset.rating_tags);
+  setFieldValue('qualityTags', savedSettings.quality_tags ?? preset.quality_tags);
   if (presetDescription) {
     const source = preset.source === 'user' ? 'User preset' : 'Built-in preset';
     presetDescription.textContent = `${source}: ${preset.description || 'Customize the system prompt and user message template below.'}`;
@@ -82,6 +116,7 @@ if (captionPresetSelect) {
 }
 
 function collectPresetPayload(name, id = '') {
+  const batchSettings = getBatchBody();
   return {
     id,
     name,
@@ -90,7 +125,11 @@ function collectPresetPayload(name, id = '') {
     system_prompt: document.getElementById('systemPrompt').value,
     user_template: document.getElementById('userTemplate').value,
     prefill: document.getElementById('prefill').value,
-    max_output_tokens: Number(document.getElementById('maxOutputTokens').value)
+    max_output_tokens: Number(document.getElementById('maxOutputTokens').value),
+    saved_settings: {
+      ...batchSettings,
+      existing_caption: document.getElementById('existingCaption').value
+    }
   };
 }
 
