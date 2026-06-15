@@ -1414,37 +1414,15 @@ def _write_caption_metadata(path:str, payload:dict)->None:
         fh.write("\n")
 
 
-def _review_training_metadata(
-    raw_model_output:str,
-    source_caption_or_tags:str,
-    region_payload:dict|None,
-    region_candidates:list[dict],
-    prompt_version:str,
-    model:str,
-    system_prompt:str,
-    user_prompt:str,
-    prefill:str,
-    media_kind:str,
-    visual_input_count:int,
-)->dict:
+def _review_training_metadata(raw_model_output:str, source_caption_or_tags:str, region_payload:dict|None, region_candidates:list[dict], prompt_version:str, model:str)->dict:
     normalized_prompts = None
     raw_detector_text = None
     if isinstance(region_payload, dict):
         raw_detector_text = region_payload.get("raw_detector_text")
         normalized_prompts = region_payload.get("normalized_detector_prompts") or region_payload.get("detector_prompts")
 
-    model_input_prompt = {
-        "system_prompt": (system_prompt or "").strip(),
-        "user_prompt": user_prompt or "",
-        "assistant_prefill": prefill or "",
-        "media_kind": media_kind,
-        "visual_input_count": visual_input_count,
-        "visual_inputs_omitted": True,
-    }
-
     return {
         "raw_model_output": raw_model_output,
-        "model_input_prompt": model_input_prompt,
         "manual_fixed_output": None,
         "manual_reviewed": False,
         "manual_reviewed_at": None,
@@ -1458,7 +1436,6 @@ def _review_training_metadata(
             "prompt_version": prompt_version,
             "model": model or DEFAULT_MODEL,
             "model_backend": BACKEND_DISPLAY_NAME,
-            "model_input_prompt": model_input_prompt,
         },
     }
 
@@ -1614,11 +1591,6 @@ def _process_one_target(fn:str, params:dict):
             region_candidates=region_candidates_used_in_prompt,
             prompt_version=prompt_version,
             model=effective_model,
-            system_prompt=system_prompt_in,
-            user_prompt=caption_meta.get("prompt_used") or user_prompt,
-            prefill=prefill,
-            media_kind=media_kind,
-            visual_input_count=len(imgs),
         ))
         nullable_review_fields = {"manual_fixed_output", "manual_reviewed_at"}
         metadata_payload = {k: v for k, v in metadata_payload.items() if v is not None or k in nullable_review_fields}
