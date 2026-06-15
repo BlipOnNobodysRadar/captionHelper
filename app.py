@@ -13,10 +13,11 @@ import subprocess
 import tempfile
 import hashlib
 import sys
+from collections import defaultdict
 from flask import Flask, abort, jsonify, render_template, request, send_from_directory
 import requests
 from werkzeug.exceptions import RequestEntityTooLarge
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from presets import CAPTION_PRESETS, DEFAULT_IMAGE_SYSTEM_PROMPT, DEFAULT_VIDEO_SYSTEM_PROMPT
 
 # ------------------ Config ------------------
@@ -124,6 +125,87 @@ LMSTUDIO_ABORT_AFTER_SERVER_ERRORS = API_ABORT_AFTER_SERVER_ERRORS
 
 ALLOWED_EXTS = {".mp4", ".mov", ".avi", ".webm", ".mkv", ".m4v"}
 ALLOWED_IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
+
+
+AI_EDIT_DEFAULT_PROMPT_TEMPLATE = """You are editing an Ideogram 4 structured JSON caption for an image dataset.
+
+You will receive:
+1. The original image.
+2. An overlay image with current bounding boxes and labels.
+3. The current caption JSON.
+4. A user edit request.
+
+Your job is to return one edited caption JSON object and nothing else.
+
+Use the original image as the visual authority.
+Use the overlay image to understand the current bbox positions and labels.
+Use the current caption as the starting point.
+Preserve good existing caption content.
+Make only the changes requested by the user, plus minimal corrections needed to keep the caption valid.
+Do not rewrite the whole caption unnecessarily.
+
+All final bboxes must use the active coordinate format:
+FORMAT: {coordinate_format}
+MAX: {coordinate_max}
+
+For Ideogram default, bboxes are `[y_min, x_min, y_max, x_max]` normalized from 0 to 1000.
+
+If adding a new object element:
+- use `"type": "obj"`
+- include `"bbox"`
+- include `"desc"`
+- include `"color_palette"` only if useful
+
+If adding a text element:
+- use `"type": "text"`
+- include `"bbox"`
+- include exact visible `"text"`
+- include `"desc"`
+- do not guess unreadable letters
+
+Do not include markdown, explanation, comments, or backticks.
+Start with `{` and end with `}`.
+Return only the complete edited caption JSON.
+
+Current filename:
+{filename}
+
+Caption schema instructions:
+{caption_schema_instructions}
+
+Selected element:
+{selected_element_summary}
+
+Current elements:
+{element_summaries}
+
+Current caption JSON:
+{current_caption_json}
+
+Current validation issues:
+{validation_issues}
+
+User edit request:
+{user_request}
+"""
+
+AI_EDIT_SCHEMA_INSTRUCTIONS = """Required top-level fields include style_description, compositional_deconstruction, and an elements array. Preserve existing unknown fields when useful. Elements with bboxes must use [y_min, x_min, y_max, x_max] integers in the active coordinate range. Valid element types include obj, text, relation, and background; text elements must include exact visible text."""
+
+AI_EDIT_DEFAULT_SETTINGS = {
+    "enabled": True,
+    "base_url": "http://localhost:8080",
+    "endpoint_path": "/v1/chat/completions",
+    "model": "local-model",
+    "max_tokens": 8192,
+    "temperature": 0.1,
+    "timeout_seconds": 120,
+    "send_original_image": True,
+    "send_overlay_image": True,
+    "overlay_max_side": 1280,
+    "include_raw_json": True,
+    "include_pretty_json": True,
+    "include_prompt_template": True,
+}
 
 # Default prompts (the UI may send its own, but when modes switch we ensure sane defaults)
 DEFAULT_PROMPT_VIDEO = DEFAULT_VIDEO_SYSTEM_PROMPT
@@ -1030,6 +1112,142 @@ def validate_ideogram4_json_caption(caption:str)->dict:
     return {"valid": not errors, "errors": errors, "data": data}
 
 
+def _coerce_ai_edit_settings(raw:dict|None)->dict:
+    settings = dict(AI_EDIT_DEFAULT_SETTINGS)
+    if isinstance(raw, dict):
+        settings.update({k: v for k, v in raw.items() if k in settings})
+    settings["base_url"] = str(settings.get("base_url") or AI_EDIT_DEFAULT_SETTINGS["base_url"]).rstrip("/")
+    endpoint = str(settings.get("endpoint_path") or AI_EDIT_DEFAULT_SETTINGS["endpoint_path"]).strip()
+    settings["endpoint_path"] = endpoint if endpoint.startswith("/") else "/" + endpoint
+    for key in ("max_tokens", "timeout_seconds", "overlay_max_side"):
+        try:
+            settings[key] = max(1, int(settings.get(key) or AI_EDIT_DEFAULT_SETTINGS[key]))
+        except (TypeError, ValueError):
+            settings[key] = AI_EDIT_DEFAULT_SETTINGS[key]
+    try:
+        settings["temperature"] = float(settings.get("temperature", AI_EDIT_DEFAULT_SETTINGS["temperature"]))
+    except (TypeError, ValueError):
+        settings["temperature"] = AI_EDIT_DEFAULT_SETTINGS["temperature"]
+    for key in ("enabled", "send_original_image", "send_overlay_image", "include_raw_json", "include_pretty_json", "include_prompt_template"):
+        settings[key] = bool(settings.get(key))
+    return settings
+
+
+def _caption_elements(caption)->list:
+    if not isinstance(caption, dict):
+        return []
+    elements = caption.get("elements")
+    if isinstance(elements, list):
+        return elements
+    comp = caption.get("compositional_deconstruction")
+    if isinstance(comp, dict) and isinstance(comp.get("elements"), list):
+        return comp.get("elements")
+    return []
+
+
+def _element_label(element:dict, index:int)->str:
+    typ = str(element.get("type") or element.get("type_hint") or "elem")
+    desc = str(element.get("desc") or element.get("description") or element.get("text") or "").strip()
+    desc = re.sub(r"\s+", " ", desc)[:80]
+    return f"{index + 1} {typ}: {desc}" if desc else f"{index + 1} {typ}"
+
+
+def _bbox_to_pixels(bbox, width:int, height:int, coordinate_max:int)->tuple[int, int, int, int]:
+    y1, x1, y2, x2 = [float(v) for v in bbox]
+    scale = float(coordinate_max or 1000)
+    return (
+        int(round(x1 / scale * width)),
+        int(round(y1 / scale * height)),
+        int(round(x2 / scale * width)),
+        int(round(y2 / scale * height)),
+    )
+
+
+def _render_ai_bbox_overlay(image:Image.Image, caption:dict, coordinate_max:int=1000, overlay_max_side:int=1280)->str:
+    im = image.convert("RGB")
+    im = _resize_image_for_vision(im, overlay_max_side)
+    draw = ImageDraw.Draw(im, "RGBA")
+    font = ImageFont.load_default()
+    colors = ["#FF4D4D", "#4DA3FF", "#47D16C", "#FFD23F", "#D45CFF", "#FF8C3A", "#30E0D0"]
+    for idx, element in enumerate(_caption_elements(caption)):
+        bbox = element.get("bbox") if isinstance(element, dict) else None
+        if not (isinstance(element, dict) and isinstance(bbox, list) and len(bbox) == 4 and all(isinstance(v, int) and 0 <= v <= coordinate_max for v in bbox) and bbox[0] < bbox[2] and bbox[1] < bbox[3]):
+            continue
+        color = colors[idx % len(colors)]
+        x1, y1, x2, y2 = _bbox_to_pixels(element["bbox"], im.width, im.height, coordinate_max)
+        draw.rectangle([x1, y1, x2, y2], outline=color, width=max(2, round(max(im.size) / 400)))
+        label = _element_label(element, idx)
+        text_box = draw.textbbox((0, 0), label, font=font)
+        tw, th = text_box[2] - text_box[0], text_box[3] - text_box[1]
+        ty = max(0, y1 - th - 6)
+        draw.rectangle([x1, ty, min(im.width, x1 + tw + 8), ty + th + 6], fill=(0, 0, 0, 185))
+        draw.text((x1 + 4, ty + 3), label, fill=color, font=font)
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
+def _image_from_ai_request(data:dict)->tuple[Image.Image, str]:
+    image_path = str(data.get("image_path") or "").strip()
+    if image_path:
+        candidate = os.path.abspath(os.path.expanduser(image_path))
+        if not os.path.exists(candidate):
+            raise FileNotFoundError(f"Image file missing: {image_path}")
+        if not allowed_image(candidate):
+            raise ValueError("image_path must point to a supported image file")
+        return Image.open(candidate), os.path.basename(candidate)
+    data_url = str(data.get("image_data_url") or "").strip()
+    if data_url.startswith("data:image/") and "," in data_url:
+        _, encoded = data_url.split(",", 1)
+        return Image.open(io.BytesIO(base64.b64decode(encoded))), str(data.get("filename") or "uploaded image")
+    raise ValueError("Provide image_path or image_data_url for AI edit")
+
+
+def _extract_json_object(text:str)->str:
+    raw = (text or "").strip()
+    if not raw:
+        raise ValueError("Model response was empty")
+    if "```" in raw:
+        raise ValueError("Model response included Markdown/code fences; refusing unsafe repair")
+    if raw.startswith("{") and raw.endswith("}"):
+        return raw
+    start, end = raw.find("{"), raw.rfind("}")
+    if start >= 0 and end > start and not raw[:start].strip() and not raw[end + 1:].strip():
+        return raw[start:end + 1]
+    raise ValueError("Model response was not a single JSON object")
+
+
+def validate_ai_edited_caption(caption:dict, coordinate_max:int=1000)->dict:
+    errors, warnings = [], []
+    if not isinstance(caption, dict):
+        return {"valid": False, "errors": ["Top-level value must be a JSON object."], "warnings": warnings}
+    for key in ("style_description", "compositional_deconstruction"):
+        if key not in caption:
+            errors.append(f"Missing required top-level field: {key}")
+    elements = _caption_elements(caption)
+    if not isinstance(elements, list) or not elements:
+        errors.append("Caption must include a non-empty elements array (top-level or under compositional_deconstruction).")
+    valid_types = {"obj", "text", "relation", "background", "scene"}
+    for idx, element in enumerate(elements):
+        if not isinstance(element, dict):
+            errors.append(f"Element {idx + 1} must be an object.")
+            continue
+        typ = element.get("type") or element.get("type_hint")
+        if typ is not None and typ not in valid_types:
+            warnings.append(f"Element {idx + 1} has unusual type: {typ}")
+        bbox = element.get("bbox")
+        if bbox is not None:
+            if not (isinstance(bbox, list) and len(bbox) == 4 and all(isinstance(v, int) and 0 <= v <= coordinate_max for v in bbox) and bbox[0] < bbox[2] and bbox[1] < bbox[3]):
+                errors.append(f"Element {idx + 1} has invalid bbox for max {coordinate_max}: {bbox}")
+        if typ == "text" and not str(element.get("text") or "").strip():
+            errors.append(f"Text element {idx + 1} must include non-empty text.")
+    return {"valid": not errors, "errors": errors, "warnings": warnings}
+
+
+def _format_ai_template(template:str, context:dict)->str:
+    safe = {k: str(v if v is not None else "") for k, v in context.items()}
+    return (template or AI_EDIT_DEFAULT_PROMPT_TEMPLATE).format_map(defaultdict(str, safe))
+
 def _caption_with_validation(imgs, system_prompt, model, prefill, media_kind, max_output_tokens, user_prompt, validate_json=False):
     caption = call_vision_api(imgs, system_prompt, model, prefill=prefill, media_kind=media_kind, max_output_tokens=max_output_tokens, user_prompt=user_prompt)
     validation = validate_ideogram4_json_caption(caption) if validate_json else {"valid": True, "errors": []}
@@ -1100,6 +1318,117 @@ def api_config():
         "caption_presets": all_caption_presets(),
     })
 
+
+
+@app.route("/api/ai-edit-defaults", methods=["GET"])
+def api_ai_edit_defaults():
+    return jsonify({
+        "settings": AI_EDIT_DEFAULT_SETTINGS,
+        "prompt_template": AI_EDIT_DEFAULT_PROMPT_TEMPLATE,
+        "caption_schema_instructions": AI_EDIT_SCHEMA_INSTRUCTIONS,
+    })
+
+
+@app.route("/api/ai-edit-caption", methods=["POST"])
+def api_ai_edit_caption():
+    data = request.get_json(force=True) or {}
+    settings = _coerce_ai_edit_settings(data.get("settings") or {})
+    debug = {"overlay_generated": False, "llamacpp_url": settings["base_url"] + settings["endpoint_path"]}
+    if not settings.get("enabled"):
+        return jsonify({"ok": False, "error": "AI Edit is disabled in settings.", "debug": debug}), 400
+    caption = data.get("caption")
+    if not isinstance(caption, dict):
+        return jsonify({"ok": False, "error": "caption must be a JSON object"}), 400
+    user_request = str(data.get("user_request") or "").strip()
+    if not user_request:
+        return jsonify({"ok": False, "error": "user_request is required"}), 400
+    try:
+        coordinate_max = int(data.get("coordinate_max") or 1000)
+    except (TypeError, ValueError):
+        coordinate_max = 1000
+    coordinate_format = str(data.get("coordinate_format") or "yxyx")
+
+    try:
+        loaded_image, filename = _image_from_ai_request(data)
+        with loaded_image as loaded:
+            image = loaded.copy()
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc), "debug": debug}), 400
+
+    images = []
+    if settings.get("send_original_image"):
+        try:
+            tmp = _resize_image_for_vision(image.convert("RGB"), settings.get("overlay_max_side") or 1280)
+            buf = io.BytesIO(); tmp.save(buf, format="JPEG", quality=92)
+            images.append("data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("utf-8"))
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"Original image encoding failed: {exc}", "debug": debug}), 500
+    if settings.get("send_overlay_image"):
+        try:
+            images.append(_render_ai_bbox_overlay(image, caption, coordinate_max, settings.get("overlay_max_side") or 1280))
+            debug["overlay_generated"] = True
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"Overlay generation failed: {exc}", "debug": debug}), 500
+
+    current_json = json.dumps(caption, ensure_ascii=False, indent=2 if settings.get("include_pretty_json") else None) if settings.get("include_raw_json") else "[Current caption JSON omitted by AI Edit settings.]"
+    elements = _caption_elements(caption)
+    selected_index = data.get("selected_element_index")
+    selected_summary = ""
+    if isinstance(selected_index, int) and 0 <= selected_index < len(elements) and isinstance(elements[selected_index], dict):
+        selected_summary = _element_label(elements[selected_index], selected_index)
+    element_summaries = "\n".join(_element_label(el, i) for i, el in enumerate(elements) if isinstance(el, dict))
+    current_validation = validate_ai_edited_caption(caption, coordinate_max)
+    context = {
+        "user_request": user_request,
+        "current_caption_json": current_json,
+        "caption_schema_instructions": AI_EDIT_SCHEMA_INSTRUCTIONS,
+        "filename": str(data.get("filename") or filename),
+        "coordinate_format": coordinate_format,
+        "coordinate_max": coordinate_max,
+        "validation_issues": json.dumps(current_validation.get("errors") or current_validation.get("warnings") or [], ensure_ascii=False),
+        "selected_element_summary": selected_summary,
+        "element_summaries": element_summaries,
+    }
+    try:
+        prompt = _format_ai_template(data.get("prompt_template") or AI_EDIT_DEFAULT_PROMPT_TEMPLATE, context)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"Prompt template error: {exc}", "debug": debug}), 400
+
+    content = [{"type": "text", "text": prompt}]
+    content.extend({"type": "image_url", "image_url": {"url": url}} for url in images)
+    payload = {
+        "model": settings.get("model") or "local-model",
+        "temperature": settings.get("temperature", 0.1),
+        "max_tokens": settings.get("max_tokens", 8192),
+        "messages": [{"role": "user", "content": content}],
+    }
+    raw_response = ""
+    try:
+        r = requests.post(debug["llamacpp_url"], json=payload, timeout=settings.get("timeout_seconds", 120))
+    except requests.Timeout:
+        return jsonify({"ok": False, "error": "Backend timeout while contacting local vision model.", "debug": debug}), 504
+    except requests.RequestException as exc:
+        return jsonify({"ok": False, "error": f"llama.cpp server unreachable: {exc}", "debug": debug}), 502
+    if not r.ok:
+        detail = _api_error_detail(r)
+        return jsonify({"ok": False, "error": f"Local vision backend HTTP {r.status_code}: {detail}", "raw_model_response": r.text, "debug": debug}), 502
+    try:
+        response_data = r.json()
+        raw_response = response_data["choices"][0]["message"].get("content") or ""
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"Backend response was not OpenAI-compatible JSON: {exc}", "raw_model_response": r.text, "debug": debug}), 502
+    raw_response = _clean_model_caption_output(raw_response)
+    try:
+        json_text = _extract_json_object(raw_response)
+        edited = json.loads(json_text)
+        if isinstance(edited, dict) and isinstance(edited.get("edited_caption"), dict):
+            edited = edited["edited_caption"]
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"Model response was not valid JSON: {exc}", "raw_model_response": raw_response, "validation": {"valid": False, "errors": [str(exc)]}, "debug": debug}), 200
+    validation = validate_ai_edited_caption(edited, coordinate_max)
+    if not validation.get("valid"):
+        return jsonify({"ok": False, "error": "Model returned invalid caption", "raw_model_response": raw_response, "validation": validation, "debug": debug}), 200
+    return jsonify({"ok": True, "caption": edited, "raw_model_response": raw_response, "validation": validation, "debug": debug})
 
 @app.route("/api/user-presets", methods=["POST"])
 def api_save_user_preset():
