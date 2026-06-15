@@ -9,6 +9,10 @@ import queue
 import random
 import shutil
 import re
+import subprocess
+import tempfile
+import hashlib
+import sys
 from flask import Flask, abort, jsonify, render_template, request, send_from_directory
 import requests
 from werkzeug.exceptions import RequestEntityTooLarge
@@ -85,6 +89,24 @@ API_RETRY_BACKOFF_SEC = float(_env_first("CAPTION_RETRY_BACKOFF_SEC", "LLAMA_CPP
 API_ABORT_AFTER_SERVER_ERRORS = int(_env_first("CAPTION_ABORT_AFTER_SERVER_ERRORS", "LLAMA_CPP_ABORT_AFTER_SERVER_ERRORS", "LAMMA_CPP_ABORT_AFTER_SERVER_ERRORS", "LMSTUDIO_ABORT_AFTER_SERVER_ERRORS", default="3"))
 DEFAULT_MAX_IMAGE_SIDE = int(_env_first("CAPTION_MAX_IMAGE_SIDE", "LLAMA_CPP_MAX_IMAGE_SIDE", "LAMMA_CPP_MAX_IMAGE_SIDE", "LMSTUDIO_MAX_IMAGE_SIDE", default="1024"))
 DEFAULT_MAX_OUTPUT_TOKENS = int(_env_first("CAPTION_MAX_OUTPUT_TOKENS", "LLAMA_CPP_MAX_OUTPUT_TOKENS", "LAMMA_CPP_MAX_OUTPUT_TOKENS", "LMSTUDIO_MAX_OUTPUT_TOKENS", default="512"))
+REGION_PREPROCESS_SCRIPT = _env_first("CAPTION_REGION_PREPROCESS_SCRIPT", default=os.path.join(os.path.dirname(__file__), "vision_preprocess.py"))
+REGION_PREPROCESS_DETECTOR = _env_first("CAPTION_REGION_DETECTOR", default="groundingdino")
+REGION_PREPROCESS_SEGMENTER = _env_first("CAPTION_REGION_SEGMENTER", default="none")
+REGION_PREPROCESS_OCR = _env_first("CAPTION_REGION_OCR", default="none")
+REGION_PREPROCESS_MAX_REGIONS = int(_env_first("CAPTION_REGION_MAX_REGIONS", default="12"))
+REGION_PREPROCESS_OCR_THRESHOLD = float(_env_first("CAPTION_REGION_OCR_THRESHOLD", default="0.55"))
+REGION_PREPROCESS_DETECTOR_BOX_THRESHOLD = float(_env_first("CAPTION_REGION_DETECTOR_BOX_THRESHOLD", default="0.30"))
+REGION_PREPROCESS_DETECTOR_TEXT_THRESHOLD = float(_env_first("CAPTION_REGION_DETECTOR_TEXT_THRESHOLD", default="0.25"))
+REGION_PREPROCESS_DEVICE = _env_first("CAPTION_REGION_DEVICE", default="auto").strip().lower()
+REGION_PREPROCESS_MODEL_ROOT = _env_first("CAPTION_REGION_MODEL_ROOT", default=os.path.join(os.path.expanduser("~"), ".cache", "captionhelper", "vision_models"))
+REGION_PREPROCESS_AUTO_DOWNLOAD = str(_env_first("CAPTION_REGION_AUTO_DOWNLOAD", default="true")).strip().lower() in {"1", "true", "yes", "on"}
+REGION_PREPROCESS_LOAD_MODELS = str(_env_first("CAPTION_REGION_LOAD_MODELS", default="true")).strip().lower() in {"1", "true", "yes", "on"}
+REGION_PREPROCESS_DETECTOR_MODEL_PATH = _env_first("CAPTION_REGION_DETECTOR_MODEL_PATH", default="")
+REGION_PREPROCESS_SEGMENTER_MODEL_PATH = _env_first("CAPTION_REGION_SEGMENTER_MODEL_PATH", default="")
+REGION_PREPROCESS_OCR_MODEL_PATH = _env_first("CAPTION_REGION_OCR_MODEL_PATH", default="")
+LLAMA_CPP_MODEL_MANAGEMENT = _env_first("CAPTION_LLAMA_CPP_MODEL_MANAGEMENT", default="off").strip().lower()
+LLAMA_CPP_UNLOAD_DURING_PREPROCESS = str(_env_first("CAPTION_LLAMA_CPP_UNLOAD_DURING_PREPROCESS", default="false")).strip().lower() in {"1", "true", "yes", "on"}
+LLAMA_CPP_MODEL_MANAGEMENT_BASE_URL = _env_first("CAPTION_LLAMA_CPP_MODEL_MANAGEMENT_BASE_URL", default="")
 USER_PRESETS_PATH = _env_first("CAPTION_USER_PRESETS_PATH", default="user_presets.json")
 USER_JOBS_PATH = _env_first("CAPTION_USER_JOBS_PATH", default=".caption_jobs")
 APP_HOST = _env_first("CAPTION_HOST", default="127.0.0.1")
@@ -396,6 +418,277 @@ def _build_user_content(user_prompt:str, images_data_urls):
             parts.append({"type":"image_url", "image_url":{"url": url}})
     return parts
 
+
+def _sha256_file(path:str)->str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _region_candidates_for_prompt(region_payload:dict|None)->list[dict]:
+    if not isinstance(region_payload, dict):
+        return []
+    candidates = []
+    for item in list(region_payload.get("regions") or []) + list(region_payload.get("ocr") or []):
+        if not isinstance(item, dict):
+            continue
+        normalized = item.get("bbox_ideogram_yxyx") or item.get("bbox")
+        if not _valid_ideogram_bbox(normalized):
+            continue
+        candidate = {
+            "id": item.get("id"),
+            "type_hint": item.get("type_hint") or ("text" if item.get("text") else "obj"),
+            "bbox": normalized,
+            "confidence": item.get("confidence"),
+            "source": item.get("source"),
+        }
+        if item.get("label"):
+            candidate["label"] = item.get("label")
+        if item.get("text"):
+            candidate["text"] = item.get("text")
+        candidates.append({k: v for k, v in candidate.items() if v not in (None, "")})
+    return candidates
+
+
+def _augment_prompt_with_region_candidates(user_prompt:str, region_payload:dict|None)->str:
+    candidates = _region_candidates_for_prompt(region_payload)
+    if not candidates:
+        return user_prompt
+    block = json.dumps(candidates, ensure_ascii=False, indent=2)
+    instruction = (
+        "REGION_CANDIDATES:\n"
+        f"{block}\n\n"
+        "Use REGION_CANDIDATES as provisional spatial hints. Prefer these boxes over inventing "
+        "coordinates when they match visible elements. Merge duplicates, rename labels naturally, "
+        "omit wrong or low-value candidates, and add missing important elements only when necessary. "
+        "All final boxes must use Ideogram [y_min, x_min, y_max, x_max] format.\n\n"
+    )
+    return instruction + (user_prompt or "")
+
+
+def _detector_tags_from_context(context:dict)->str:
+    """Keep likely visual tags for detection while excluding artist/style/quality/rating metadata."""
+    parts = [
+        context.get("character_tags", ""),
+        context.get("copyright_tags", ""),
+        context.get("general_tags", ""),
+        context.get("existing_caption", ""),
+    ]
+    return ", ".join(str(part).strip() for part in parts if str(part or "").strip())
+
+
+def _run_region_preprocess(image_path:str, tags_text:str="", source_caption_path:str|None=None, params:dict|None=None, progress_callback=None)->dict|None:
+    params = params or {}
+    if not params.get("enable_region_preprocess"):
+        return None
+    detector = str(params.get("region_detector") or REGION_PREPROCESS_DETECTOR)
+    segmenter = str(params.get("region_segmenter") or REGION_PREPROCESS_SEGMENTER)
+    ocr = str(params.get("region_ocr") or REGION_PREPROCESS_OCR)
+    max_regions = _clamp_int(params.get("region_max_regions", REGION_PREPROCESS_MAX_REGIONS), REGION_PREPROCESS_MAX_REGIONS, 0, 64)
+    ocr_threshold = float(params.get("region_ocr_threshold", REGION_PREPROCESS_OCR_THRESHOLD))
+    detector_box_threshold = float(params.get("region_detector_box_threshold", REGION_PREPROCESS_DETECTOR_BOX_THRESHOLD))
+    detector_text_threshold = float(params.get("region_detector_text_threshold", REGION_PREPROCESS_DETECTOR_TEXT_THRESHOLD))
+    region_device = str(params.get("region_device") or REGION_PREPROCESS_DEVICE)
+    if region_device not in {"auto", "cuda", "cpu"}:
+        region_device = "auto"
+    model_root = str(params.get("region_model_root") or REGION_PREPROCESS_MODEL_ROOT)
+    auto_download = bool(params.get("region_auto_download", REGION_PREPROCESS_AUTO_DOWNLOAD))
+    load_models = bool(params.get("region_load_models", REGION_PREPROCESS_LOAD_MODELS))
+    detector_model_path = str(params.get("region_detector_model_path") or REGION_PREPROCESS_DETECTOR_MODEL_PATH)
+    segmenter_model_path = str(params.get("region_segmenter_model_path") or REGION_PREPROCESS_SEGMENTER_MODEL_PATH)
+    ocr_model_path = str(params.get("region_ocr_model_path") or REGION_PREPROCESS_OCR_MODEL_PATH)
+    with tempfile.NamedTemporaryFile(prefix="caption_regions_", suffix=".json", delete=False) as fh:
+        out_path = fh.name
+    with tempfile.NamedTemporaryFile(prefix="caption_regions_progress_", suffix=".json", delete=False) as fh:
+        progress_path = fh.name
+    with tempfile.NamedTemporaryFile(prefix="caption_regions_stderr_", suffix=".log", delete=False) as fh:
+        stderr_path = fh.name
+    cmd = [
+        sys.executable, REGION_PREPROCESS_SCRIPT,
+        "--image", image_path,
+        "--out", out_path,
+        "--progress-out", progress_path,
+        "--detector", detector,
+        "--segmenter", segmenter,
+        "--ocr", ocr,
+        "--model-root", model_root,
+        "--detector-model-path", detector_model_path,
+        "--segmenter-model-path", segmenter_model_path,
+        "--ocr-model-path", ocr_model_path,
+        "--max-regions", str(max_regions),
+        "--ocr-threshold", str(ocr_threshold),
+        "--detector-box-threshold", str(detector_box_threshold),
+        "--detector-text-threshold", str(detector_text_threshold),
+        "--device", region_device,
+    ]
+    if not auto_download:
+        cmd.append("--no-auto-download")
+    if not load_models:
+        cmd.append("--no-load-models")
+    if tags_text:
+        cmd.extend(["--tags-text", tags_text])
+    if source_caption_path:
+        cmd.extend(["--tags", source_caption_path])
+    try:
+        stderr_fh = open(stderr_path, "w", encoding="utf-8")
+        process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=stderr_fh, text=True)
+        last_progress = None
+        started_at = time.time()
+        while process.poll() is None:
+            if os.path.exists(progress_path):
+                try:
+                    with open(progress_path, "r", encoding="utf-8") as fh:
+                        progress = json.load(fh)
+                    if progress != last_progress:
+                        last_progress = progress
+                        if progress_callback:
+                            progress_callback(progress)
+                except Exception:
+                    pass
+            if time.time() - started_at > 600:
+                process.kill()
+                raise subprocess.TimeoutExpired(cmd, 600)
+            time.sleep(0.5)
+        process.communicate()
+        stderr_fh.close()
+        completed_returncode = process.returncode
+        if progress_callback:
+            progress_callback({"stage": "reading_results", "message": "Reading region preprocessing results...", "percent": 100})
+        if completed_returncode != 0:
+            try:
+                with open(stderr_path, "r", encoding="utf-8", errors="replace") as fh:
+                    stderr_text = _shorten(fh.read(), limit=4000)
+            except Exception:
+                stderr_text = ""
+            progress_hint = ""
+            if last_progress:
+                progress_hint = f" Last progress: {json.dumps(last_progress, ensure_ascii=False)}"
+            error_text = stderr_text or f"region preprocessor failed with exit code {completed_returncode}.{progress_hint}"
+            return {
+                "regions": [],
+                "ocr": [],
+                "error": error_text,
+                "returncode": completed_returncode,
+                "last_progress": last_progress,
+                "command": cmd,
+            }
+        with open(out_path, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        payload["command"] = cmd
+        return payload
+    finally:
+        try:
+            os.remove(out_path)
+        except Exception:
+            pass
+        try:
+            os.remove(progress_path)
+        except Exception:
+            pass
+        try:
+            os.remove(stderr_path)
+        except Exception:
+            pass
+
+
+def _valid_ideogram_bbox(value)->bool:
+    return (
+        isinstance(value, list)
+        and len(value) == 4
+        and all(isinstance(v, int) and 0 <= v <= 1000 for v in value)
+        and value[0] < value[2]
+        and value[1] < value[3]
+    )
+
+
+def _region_preprocess_warnings(region_payload:dict|None)->list[str]:
+    if not isinstance(region_payload, dict):
+        return []
+    warnings = [str(item) for item in (region_payload.get("warnings") or []) if str(item).strip()]
+    if region_payload.get("error"):
+        warnings.insert(0, str(region_payload["error"]))
+    return warnings
+
+
+def _region_preprocess_summary(region_payload:dict|None)->dict:
+    warnings = _region_preprocess_warnings(region_payload)
+    if not isinstance(region_payload, dict):
+        return {"enabled": False, "warnings": warnings, "skipped": False}
+    candidates = len(region_payload.get("regions") or []) + len(region_payload.get("ocr") or [])
+    selected = [
+        region_payload.get("detector"),
+        region_payload.get("segmenter"),
+        region_payload.get("ocr_engine"),
+    ]
+    selected = [item for item in selected if item and item != "none"]
+    model_load_status = region_payload.get("model_load_status") or {}
+    failed_loads = [
+        name
+        for name, status in model_load_status.items()
+        if isinstance(status, dict) and status.get("loaded") is False
+    ]
+    skipped = candidates == 0 and bool(warnings or failed_loads or region_payload.get("error"))
+    return {
+        "enabled": True,
+        "skipped": skipped,
+        "candidate_count": candidates,
+        "warnings": warnings,
+        "failed_model_loads": failed_loads,
+    }
+
+
+def _llamacpp_management_root_url()->str:
+    if LLAMA_CPP_MODEL_MANAGEMENT_BASE_URL:
+        return LLAMA_CPP_MODEL_MANAGEMENT_BASE_URL.rstrip("/")
+    if API_BASE_URL.endswith("/v1"):
+        return API_BASE_URL[:-3].rstrip("/")
+    return API_BASE_URL.rstrip("/")
+
+
+def _llamacpp_router_model_action(action:str, model:str)->dict:
+    if BACKEND != "llamacpp":
+        return {"ok": False, "skipped": True, "reason": "backend is not llama.cpp"}
+    if not model:
+        return {"ok": False, "skipped": True, "reason": "no model configured"}
+    url = f"{_llamacpp_management_root_url()}/models/{action}"
+    try:
+        response = requests.post(url, json={"model": model}, timeout=120)
+    except requests.RequestException as exc:
+        return {"ok": False, "error": str(exc), "url": url, "model": model, "action": action}
+    if not response.ok:
+        return {
+            "ok": False,
+            "status_code": response.status_code,
+            "error": _api_error_detail(response),
+            "url": url,
+            "model": model,
+            "action": action,
+        }
+    payload = None
+    try:
+        payload = response.json()
+    except Exception:
+        payload = response.text
+    return {"ok": True, "url": url, "model": model, "action": action, "response": payload}
+
+
+def _maybe_unload_llamacpp_for_preprocess(model:str, enabled:bool)->dict|None:
+    if not enabled:
+        return None
+    return _llamacpp_router_model_action("unload", model or DEFAULT_MODEL)
+
+
+def _maybe_reload_llamacpp_after_preprocess(model:str, unload_result:dict|None)->dict|None:
+    if not unload_result:
+        return None
+    if unload_result.get("skipped"):
+        return {"ok": False, "skipped": True, "reason": unload_result.get("reason")}
+    # Reload even if unload failed: router mode will no-op/load as needed, and this
+    # gives Gemma the best chance of being resident before the caption request.
+    return _llamacpp_router_model_action("load", model or DEFAULT_MODEL)
+
 def allowed_video(path:str)->bool:
     return os.path.splitext(path)[1].lower() in ALLOWED_EXTS
 
@@ -499,6 +792,21 @@ def _shorten(text:str, limit:int=700)->str:
     return text[:limit].rstrip() + " …"
 
 
+def _clean_model_caption_output(text:str)->str:
+    text = (text or "").strip()
+    # Some llama.cpp/Jinja reasoning combinations can leak channel markers into
+    # the assistant content even with reasoning disabled. Strip only the known
+    # wrapper tokens, leaving the actual caption/JSON untouched.
+    text = re.sub(r"^\s*<\|?channel\|?>thought\s*<channel\|>\s*", "", text)
+    text = re.sub(r"^\s*<\|?channel\|?>[^<\n]*\s*", "", text)
+    text = text.replace("<|channel|>thought", "").replace("<|channel>thought", "").replace("<channel|>", "")
+    if text.startswith("<") and "{" in text:
+        prefix, rest = text.split("{", 1)
+        if "channel" in prefix.lower() or "thought" in prefix.lower():
+            text = "{" + rest
+    return text.strip()
+
+
 def _api_error_detail(response):
     body_text = ""
     try:
@@ -571,7 +879,7 @@ def call_vision_api(images_data_urls, system_prompt:str, model:str, prefill:str=
             if r.ok:
                 data = r.json()
                 content = data["choices"][0]["message"].get("content")
-                caption = (content or "").strip()
+                caption = _clean_model_caption_output(content or "")
                 if caption:
                     return caption
 
@@ -601,6 +909,86 @@ def call_vision_api(images_data_urls, system_prompt:str, model:str, prefill:str=
 
     raise last_error or VisionAPIRequestError(None, "Vision API request failed for an unknown reason")
 
+
+_HEX_COLOR_RE = re.compile(r"^#[0-9A-F]{6}$")
+
+
+def _walk_json(value):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _walk_json(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_json(child)
+
+
+def validate_ideogram4_json_caption(caption:str)->dict:
+    errors = []
+    raw = (caption or "").strip()
+    if not (raw.startswith("{") and raw.endswith("}")):
+        errors.append("Output must contain raw JSON only, starting with { and ending with }.")
+    if re.search(r"```|\\bHere is\\b|\\bJSON\\b", raw):
+        errors.append("Output contains trailing commentary or Markdown markers.")
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return {"valid": False, "errors": errors + [f"JSON parse error: {exc}"], "data": None}
+    if not isinstance(data, dict):
+        errors.append("Top-level value must be a JSON object.")
+        return {"valid": False, "errors": errors, "data": data}
+    expected_top = ["high_level_description", "style_description", "compositional_deconstruction"]
+    if list(data.keys()) != expected_top:
+        errors.append(f"Top-level keys must be exactly in this order: {expected_top}.")
+    style = data.get("style_description")
+    if not isinstance(style, dict):
+        errors.append("style_description must be an object.")
+    else:
+        has_photo = "photo" in style
+        has_art_style = "art_style" in style
+        if has_photo == has_art_style:
+            errors.append("style_description must include exactly one of photo or art_style.")
+        medium = style.get("medium")
+        allowed_mediums = {"photograph", "illustration", "painting", "3d_render", "graphic_design", "mixed_media", "screenshot"}
+        if not isinstance(medium, str) or not medium or (medium not in allowed_mediums and len(medium) > 40):
+            errors.append("style_description.medium is missing or invalid.")
+        expected_style = ["aesthetics", "lighting", "photo", "medium", "color_palette"] if has_photo else ["aesthetics", "lighting", "medium", "art_style", "color_palette"]
+        if list(style.keys()) != expected_style:
+            errors.append(f"style_description keys must be in this order: {expected_style}.")
+        palette = style.get("color_palette")
+        if not isinstance(palette, list) or not all(isinstance(c, str) and _HEX_COLOR_RE.match(c) for c in palette):
+            errors.append("color_palette must contain uppercase #RRGGBB hex colors.")
+    if re.search(r"\\bscore_\\d+\\b", raw, re.I):
+        errors.append("Raw score_x tags are not allowed.")
+    for obj in _walk_json(data):
+        bbox = obj.get("bbox")
+        if bbox is not None and not _valid_ideogram_bbox(bbox):
+            errors.append(f"Invalid bbox: {bbox}")
+        if obj.get("type") == "text" or obj.get("type_hint") == "text":
+            if "text" not in obj or not str(obj.get("text") or "").strip():
+                errors.append("Text elements must include non-empty text.")
+        for key, value in obj.items():
+            if key.endswith("color") and isinstance(value, str) and value.startswith("#") and not _HEX_COLOR_RE.match(value):
+                errors.append(f"Invalid hex color for {key}: {value}")
+    return {"valid": not errors, "errors": errors, "data": data}
+
+
+def _caption_with_validation(imgs, system_prompt, model, prefill, media_kind, max_output_tokens, user_prompt, validate_json=False):
+    caption = call_vision_api(imgs, system_prompt, model, prefill=prefill, media_kind=media_kind, max_output_tokens=max_output_tokens, user_prompt=user_prompt)
+    validation = validate_ideogram4_json_caption(caption) if validate_json else {"valid": True, "errors": []}
+    retried = False
+    if validate_json and not validation["valid"]:
+        retry_prompt = (
+            user_prompt.rstrip()
+            + "\n\nThe previous response failed validation:\n"
+            + "\n".join(f"- {err}" for err in validation["errors"])
+            + "\n\nReturn corrected Ideogram 4 JSON only. Do not include commentary."
+        )
+        retried = True
+        caption = call_vision_api(imgs, system_prompt, model, prefill=prefill, media_kind=media_kind, max_output_tokens=max_output_tokens, user_prompt=retry_prompt)
+        validation = validate_ideogram4_json_caption(caption)
+    return caption, {"validation": validation, "retried": retried}
+
 # ------------------ Simple chat route ------------------
 @app.route("/")
 def index():
@@ -626,6 +1014,27 @@ def api_config():
         "abort_after_server_errors": API_ABORT_AFTER_SERVER_ERRORS,
         "max_image_side": DEFAULT_MAX_IMAGE_SIDE,
         "max_output_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
+        "llama_cpp_model_management": {
+            "mode": LLAMA_CPP_MODEL_MANAGEMENT,
+            "unload_during_preprocess": LLAMA_CPP_UNLOAD_DURING_PREPROCESS,
+            "base_url": _llamacpp_management_root_url(),
+        },
+        "region_preprocess": {
+            "detector": REGION_PREPROCESS_DETECTOR,
+            "segmenter": REGION_PREPROCESS_SEGMENTER,
+            "ocr": REGION_PREPROCESS_OCR,
+            "max_regions": REGION_PREPROCESS_MAX_REGIONS,
+            "ocr_threshold": REGION_PREPROCESS_OCR_THRESHOLD,
+            "detector_box_threshold": REGION_PREPROCESS_DETECTOR_BOX_THRESHOLD,
+            "detector_text_threshold": REGION_PREPROCESS_DETECTOR_TEXT_THRESHOLD,
+            "device": REGION_PREPROCESS_DEVICE,
+            "model_root": REGION_PREPROCESS_MODEL_ROOT,
+            "auto_download": REGION_PREPROCESS_AUTO_DOWNLOAD,
+            "load_models": REGION_PREPROCESS_LOAD_MODELS,
+            "detector_model_path": REGION_PREPROCESS_DETECTOR_MODEL_PATH,
+            "segmenter_model_path": REGION_PREPROCESS_SEGMENTER_MODEL_PATH,
+            "ocr_model_path": REGION_PREPROCESS_OCR_MODEL_PATH,
+        },
         "caption_presets": all_caption_presets(),
     })
 
@@ -706,6 +1115,8 @@ def chat_caption():
     max_output_tokens = _clamp_int(request.form.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS), DEFAULT_MAX_OUTPUT_TOKENS, 0, 8192)
     use_existing = request.form.get("use_existing_caption","false").lower() in ("1","true","yes","on")
     existing_caption_text = request.form.get("existing_caption","")
+    enable_region_preprocess = request.form.get("enable_region_preprocess","false").lower() in ("1","true","yes","on")
+    validate_ideogram_json = request.form.get("validate_ideogram_json","false").lower() in ("1","true","yes","on")
 
     media_kind = "image" if image_mode else "clip"
 
@@ -737,8 +1148,38 @@ def chat_caption():
         existing_for_prompt = existing_caption_text if use_existing else ""
         context = _context_from_request_values(metadata_values, existing_for_prompt, image_mode=image_mode, input_count=len(imgs))
         user_prompt = _render_user_template(user_template, context)
-        caption = call_vision_api(imgs, system_prompt_in, model, prefill=prefill, media_kind=media_kind, max_output_tokens=max_output_tokens, user_prompt=user_prompt)
-        return jsonify({"caption": caption, "frames_used": len(imgs)})
+        region_payload = None
+        model_management = None
+        if image_mode and enable_region_preprocess:
+            unload_enabled = request.form.get("llama_cpp_unload_during_preprocess", str(LLAMA_CPP_UNLOAD_DURING_PREPROCESS)).lower() in ("1","true","yes","on")
+            unload_result = _maybe_unload_llamacpp_for_preprocess(model, enabled=unload_enabled)
+            region_payload = _run_region_preprocess(
+                upload_path,
+                tags_text=_detector_tags_from_context(context),
+                params={
+                    "enable_region_preprocess": True,
+                    "region_detector": request.form.get("region_detector") or REGION_PREPROCESS_DETECTOR,
+                    "region_segmenter": request.form.get("region_segmenter") or REGION_PREPROCESS_SEGMENTER,
+                    "region_ocr": request.form.get("region_ocr") or REGION_PREPROCESS_OCR,
+                    "region_max_regions": request.form.get("region_max_regions") or REGION_PREPROCESS_MAX_REGIONS,
+                    "region_ocr_threshold": request.form.get("region_ocr_threshold") or REGION_PREPROCESS_OCR_THRESHOLD,
+                    "region_detector_box_threshold": request.form.get("region_detector_box_threshold") or REGION_PREPROCESS_DETECTOR_BOX_THRESHOLD,
+                    "region_detector_text_threshold": request.form.get("region_detector_text_threshold") or REGION_PREPROCESS_DETECTOR_TEXT_THRESHOLD,
+                    "region_device": request.form.get("region_device") or REGION_PREPROCESS_DEVICE,
+                    "region_model_root": request.form.get("region_model_root") or REGION_PREPROCESS_MODEL_ROOT,
+                    "region_auto_download": request.form.get("region_auto_download","true").lower() in ("1","true","yes","on"),
+                    "region_load_models": request.form.get("region_load_models","true").lower() in ("1","true","yes","on"),
+                    "region_detector_model_path": request.form.get("region_detector_model_path") or REGION_PREPROCESS_DETECTOR_MODEL_PATH,
+                    "region_segmenter_model_path": request.form.get("region_segmenter_model_path") or REGION_PREPROCESS_SEGMENTER_MODEL_PATH,
+                    "region_ocr_model_path": request.form.get("region_ocr_model_path") or REGION_PREPROCESS_OCR_MODEL_PATH,
+                },
+            )
+            reload_result = _maybe_reload_llamacpp_after_preprocess(model, unload_result)
+            model_management = {"unload_before_preprocess": unload_result, "reload_after_preprocess": reload_result}
+            user_prompt = _augment_prompt_with_region_candidates(user_prompt, region_payload)
+        caption, caption_meta = _caption_with_validation(imgs, system_prompt_in, model, prefill, media_kind, max_output_tokens, user_prompt, validate_json=validate_ideogram_json)
+        preprocess_summary = _region_preprocess_summary(region_payload) if enable_region_preprocess else {"enabled": False, "warnings": [], "skipped": False}
+        return jsonify({"caption": caption, "frames_used": len(imgs), "region_preprocess": region_payload, "region_preprocess_summary": preprocess_summary, "model_management": model_management, **caption_meta})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     finally:
@@ -889,6 +1330,17 @@ def _write_caption_error_debug_file(output_paths:dict, error:VisionAPIRequestErr
     return debug_path
 
 
+def _metadata_path_for_caption(caption_path:str)->str:
+    return os.path.splitext(caption_path)[0] + ".caption_meta.json"
+
+
+def _write_caption_metadata(path:str, payload:dict)->None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+
+
 def _select_targets(folder:str, image_mode:bool):
     if image_mode:
         selected = [p for p in os.listdir(folder) if allowed_image(os.path.join(folder, p))]
@@ -903,6 +1355,27 @@ def _clamp_int(value, default:int, minimum:int=1, maximum:int=16)->int:
     except (TypeError, ValueError):
         n = default
     return max(minimum, min(maximum, n))
+
+
+def _read_grounding_text(in_path:str, out_txt:str, use_existing:bool)->str:
+    if not use_existing:
+        return ""
+    source_base, _ = os.path.splitext(in_path)
+    source_txt = source_base + ".txt"
+    grounding_txt = source_txt if os.path.exists(source_txt) else out_txt
+    if not os.path.exists(grounding_txt):
+        return ""
+    try:
+        with open(grounding_txt, "r", encoding="utf-8") as fh:
+            return fh.read().strip()
+    except Exception:
+        return ""
+
+
+def _target_would_skip(in_path:str, params:dict)->bool:
+    output_paths = _build_output_paths(in_path, params)
+    out_txt = output_paths["caption"]
+    return os.path.exists(out_txt) and (not params.get("overwrite")) and (not params.get("prepend_existing"))
 
 
 def _process_one_target(fn:str, params:dict):
@@ -920,6 +1393,8 @@ def _process_one_target(fn:str, params:dict):
     use_existing = params["use_existing_caption"]
     max_image_side = params.get("max_image_side", DEFAULT_MAX_IMAGE_SIDE)
     max_output_tokens = params.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS)
+    enable_region_preprocess = bool(params.get("enable_region_preprocess", False))
+    validate_ideogram_json = bool(params.get("validate_ideogram_json", False))
 
     media_kind = "image" if image_mode else "clip"
     in_path = os.path.join(folder, fn)
@@ -936,13 +1411,7 @@ def _process_one_target(fn:str, params:dict):
     try:
         old_text = ""
         if use_existing:
-            grounding_txt = source_txt if os.path.exists(source_txt) else out_txt
-            if os.path.exists(grounding_txt):
-                try:
-                    with open(grounding_txt, "r", encoding="utf-8") as fh:
-                        old_text = fh.read().strip()
-                except Exception:
-                    old_text = ""
+            old_text = _read_grounding_text(in_path, out_txt, use_existing)
 
         # Prepare inputs. This happens inside the worker, so multiple files can be prepared
         # and sent to the local vision API at once.
@@ -956,10 +1425,65 @@ def _process_one_target(fn:str, params:dict):
 
         context = _context_from_request_values(metadata_values, old_text, image_mode=image_mode, input_count=len(imgs))
         user_prompt = _render_user_template(user_template, context)
-        caption = call_vision_api(imgs, system_prompt_in, model, prefill=prefill, media_kind=media_kind, max_output_tokens=max_output_tokens, user_prompt=user_prompt)
+        region_payload = None
+        model_management = None
+        preprocessed = (params.get("preprocessed_regions") or {}).get(fn) if isinstance(params.get("preprocessed_regions"), dict) else None
+        if isinstance(preprocessed, dict):
+            region_payload = preprocessed.get("region_payload")
+            model_management = preprocessed.get("model_management")
+        if image_mode and enable_region_preprocess:
+            if region_payload is None:
+                unload_result = _maybe_unload_llamacpp_for_preprocess(model, enabled=bool(params.get("llama_cpp_unload_during_preprocess", LLAMA_CPP_UNLOAD_DURING_PREPROCESS)))
+                def progress_callback(progress:dict):
+                    job_id = params.get("job_id")
+                    if not job_id:
+                        return
+                    with JOBS_LOCK:
+                        job = JOBS.get(job_id)
+                        if not job:
+                            return
+                        active_details = job.setdefault("active_details", {})
+                        active_details[fn] = progress
+
+                region_payload = _run_region_preprocess(in_path, tags_text=_detector_tags_from_context(context), source_caption_path=None, params=params, progress_callback=progress_callback)
+                reload_result = _maybe_reload_llamacpp_after_preprocess(model, unload_result)
+                model_management = {"unload_before_preprocess": unload_result, "reload_after_preprocess": reload_result}
+            user_prompt = _augment_prompt_with_region_candidates(user_prompt, region_payload)
+
+        caption, caption_meta = _caption_with_validation(imgs, system_prompt_in, model, prefill, media_kind, max_output_tokens, user_prompt, validate_json=validate_ideogram_json)
+        validation = caption_meta.get("validation") or {}
+        preprocess_summary = _region_preprocess_summary(region_payload) if enable_region_preprocess else {"enabled": False, "warnings": [], "skipped": False}
 
         os.makedirs(output_paths["dir"], exist_ok=True)
         _copy_media_if_needed(in_path, output_paths, overwrite)
+
+        metadata_payload = {
+            "image_path": in_path,
+            "image_hash": _sha256_file(in_path) if image_mode else None,
+            "source_caption_path": source_txt if os.path.exists(source_txt) else None,
+            "final_caption_path": out_txt,
+            "prompt_version": "captionhelper-region-proposal-v1",
+            "model_backend": BACKEND_DISPLAY_NAME,
+            "model": model or DEFAULT_MODEL,
+            "llama_cpp_settings": {
+                "api_base_url": API_BASE_URL,
+                "max_image_side": max_image_side,
+                "max_output_tokens": max_output_tokens,
+                "temperature": 0.2,
+            },
+            "region_proposal": region_payload,
+            "region_preprocess_summary": preprocess_summary,
+            "llama_cpp_model_management": model_management,
+            "region_candidates_used_in_prompt": _region_candidates_for_prompt(region_payload),
+            "final_validation_result": validation,
+            "validation_retried": bool(caption_meta.get("retried")),
+            "manual_reviewed": False,
+        }
+        metadata_payload = {k: v for k, v in metadata_payload.items() if v is not None}
+        meta_path = _metadata_path_for_caption(out_txt)
+        if validate_ideogram_json and not validation.get("valid"):
+            _write_caption_metadata(meta_path, metadata_payload)
+            return {"file": fn, "ok": False, "error": "Caption failed Ideogram JSON validation after retry", "validation_errors": validation.get("errors", []), "metadata_out": os.path.relpath(meta_path, folder), "region_preprocess_summary": preprocess_summary, "model_management": model_management}
 
         if os.path.exists(out_txt) and prepend_existing:
             try:
@@ -973,12 +1497,16 @@ def _process_one_target(fn:str, params:dict):
         else:
             with open(out_txt, "w", encoding="utf-8") as fh:
                 fh.write(caption.strip())
+        _write_caption_metadata(meta_path, metadata_payload)
 
         return {
             "file": fn,
             "ok": True,
             "out": os.path.relpath(out_txt, folder),
             "media_out": os.path.relpath(output_paths["media"], folder) if output_paths.get("needs_media_copy") else None,
+            "metadata_out": os.path.relpath(meta_path, folder),
+            "region_preprocess_summary": preprocess_summary,
+            "model_management": model_management,
         }
     except VisionAPIRequestError as e:
         out = {"file": fn, "ok": False, "error": str(e), "server_error": True}
@@ -1000,6 +1528,7 @@ def _run_batch(job_id:str):
         if not job:
             return
         params = dict(job["params"])
+    params["job_id"] = job_id
 
     folder = params["target_folder"]
     image_mode = params["image_mode"]
@@ -1021,11 +1550,82 @@ def _run_batch(job_id:str):
         job["started_at"] = batch_started_at
         job["finished_at"] = None
         job["active"] = {}
+        job["active_details"] = {}
         job["current"] = None
         job["server_error_count"] = 0
         job["abort_reason"] = None
         job["selected_targets"] = targets
         _persist_job(job)
+
+    if image_mode and params.get("enable_region_preprocess"):
+        unload_enabled = bool(params.get("llama_cpp_unload_during_preprocess", LLAMA_CPP_UNLOAD_DURING_PREPROCESS))
+        unload_result = _maybe_unload_llamacpp_for_preprocess(params.get("model") or DEFAULT_MODEL, enabled=unload_enabled)
+        preprocessed_regions = {}
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+            if job:
+                job["status"] = "preprocessing"
+                job["preprocess_completed"] = 0
+                job["preprocess_total"] = len(targets)
+                job["llama_cpp_preprocess_unload"] = unload_result
+                _persist_job(job)
+
+        for fn in targets:
+            in_path = os.path.join(folder, fn)
+            if _target_would_skip(in_path, params):
+                with JOBS_LOCK:
+                    job = JOBS.get(job_id)
+                    if job:
+                        job["preprocess_completed"] = int(job.get("preprocess_completed", 0)) + 1
+                continue
+            output_paths = _build_output_paths(in_path, params)
+            old_text = _read_grounding_text(in_path, output_paths["caption"], bool(params.get("use_existing_caption")))
+            context = _context_from_request_values(params.get("metadata_values", {}), old_text, image_mode=True, input_count=1)
+
+            def progress_callback(progress:dict, file_name=fn):
+                with JOBS_LOCK:
+                    job = JOBS.get(job_id)
+                    if not job:
+                        return
+                    active = job.setdefault("active", {})
+                    active[file_name] = active.get(file_name, time.time())
+                    active_details = job.setdefault("active_details", {})
+                    active_details[file_name] = progress
+                    job["current"] = file_name
+
+            region_payload = _run_region_preprocess(
+                in_path,
+                tags_text=_detector_tags_from_context(context),
+                source_caption_path=None,
+                params=params,
+                progress_callback=progress_callback,
+            )
+            preprocessed_regions[fn] = {
+                "region_payload": region_payload,
+                "model_management": {"unload_before_preprocess": unload_result, "reload_after_preprocess": None},
+            }
+            with JOBS_LOCK:
+                job = JOBS.get(job_id)
+                if job:
+                    job.setdefault("active", {}).pop(fn, None)
+                    job.setdefault("active_details", {}).pop(fn, None)
+                    job["current"] = None
+                    job["preprocess_completed"] = int(job.get("preprocess_completed", 0)) + 1
+                    _persist_job(job)
+
+        reload_result = _maybe_reload_llamacpp_after_preprocess(params.get("model") or DEFAULT_MODEL, unload_result)
+        for item in preprocessed_regions.values():
+            item["model_management"]["reload_after_preprocess"] = reload_result
+        params["preprocessed_regions"] = preprocessed_regions
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+            if job:
+                job["status"] = "running"
+                job["llama_cpp_preprocess_reload"] = reload_result
+                job["active"] = {}
+                job["active_details"] = {}
+                job["current"] = None
+                _persist_job(job)
 
     def worker(worker_id:int):
         while True:
@@ -1059,6 +1659,8 @@ def _run_batch(job_id:str):
                     return
                 active = job.setdefault("active", {})
                 active.pop(fn, None)
+                active_details = job.setdefault("active_details", {})
+                active_details.pop(fn, None)
                 job["current"] = ", ".join(active.keys()) or None
                 job["results"].append(res)
                 job["completed"] += 1
@@ -1141,6 +1743,11 @@ def batch_start():
     max_output_tokens = _clamp_int(data.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS), DEFAULT_MAX_OUTPUT_TOKENS, 0, 8192)
     max_concurrent = _clamp_int(data.get("max_concurrent", DEFAULT_BATCH_CONCURRENCY), DEFAULT_BATCH_CONCURRENCY, 1, MAX_BATCH_CONCURRENCY)
     abort_after_server_errors = _clamp_int(data.get("abort_after_server_errors", API_ABORT_AFTER_SERVER_ERRORS), API_ABORT_AFTER_SERVER_ERRORS, 0, 999)
+    enable_region_preprocess = bool(data.get("enable_region_preprocess", False))
+    validate_ideogram_json = bool(data.get("validate_ideogram_json", False))
+    region_auto_download = bool(data.get("region_auto_download", REGION_PREPROCESS_AUTO_DOWNLOAD))
+    region_load_models = bool(data.get("region_load_models", REGION_PREPROCESS_LOAD_MODELS))
+    llama_cpp_unload_during_preprocess = bool(data.get("llama_cpp_unload_during_preprocess", LLAMA_CPP_UNLOAD_DURING_PREPROCESS))
 
     job_id = uuid.uuid4().hex
     params = {
@@ -1163,7 +1770,24 @@ def batch_start():
         "max_image_side": max_image_side,
         "max_output_tokens": max_output_tokens,
         "max_concurrent": max_concurrent,
-        "abort_after_server_errors": abort_after_server_errors
+        "abort_after_server_errors": abort_after_server_errors,
+        "enable_region_preprocess": enable_region_preprocess,
+        "validate_ideogram_json": validate_ideogram_json,
+        "region_detector": data.get("region_detector", REGION_PREPROCESS_DETECTOR),
+        "region_segmenter": data.get("region_segmenter", REGION_PREPROCESS_SEGMENTER),
+        "region_ocr": data.get("region_ocr", REGION_PREPROCESS_OCR),
+        "region_max_regions": _clamp_int(data.get("region_max_regions", REGION_PREPROCESS_MAX_REGIONS), REGION_PREPROCESS_MAX_REGIONS, 0, 64),
+        "region_ocr_threshold": float(data.get("region_ocr_threshold", REGION_PREPROCESS_OCR_THRESHOLD)),
+        "region_detector_box_threshold": float(data.get("region_detector_box_threshold", REGION_PREPROCESS_DETECTOR_BOX_THRESHOLD)),
+        "region_detector_text_threshold": float(data.get("region_detector_text_threshold", REGION_PREPROCESS_DETECTOR_TEXT_THRESHOLD)),
+        "region_device": data.get("region_device") or REGION_PREPROCESS_DEVICE,
+        "region_model_root": data.get("region_model_root") or REGION_PREPROCESS_MODEL_ROOT,
+        "region_auto_download": region_auto_download,
+        "region_load_models": region_load_models,
+        "region_detector_model_path": data.get("region_detector_model_path") or REGION_PREPROCESS_DETECTOR_MODEL_PATH,
+        "region_segmenter_model_path": data.get("region_segmenter_model_path") or REGION_PREPROCESS_SEGMENTER_MODEL_PATH,
+        "region_ocr_model_path": data.get("region_ocr_model_path") or REGION_PREPROCESS_OCR_MODEL_PATH,
+        "llama_cpp_unload_during_preprocess": llama_cpp_unload_during_preprocess,
     }
 
     with JOBS_LOCK:
@@ -1176,6 +1800,7 @@ def batch_start():
             "completed": 0,
             "current": None,
             "active": {},
+            "active_details": {},
             "results": [],
             "cancel": False,
             "started_at": None,
@@ -1247,6 +1872,7 @@ def batch_resume():
             "completed": 0,
             "current": None,
             "active": {},
+            "active_details": {},
             "results": [],
             "cancel": False,
             "started_at": None,
@@ -1294,9 +1920,14 @@ def batch_progress():
         avg_item_sec = (sum(durations) / len(durations)) if durations else None
 
         active_raw = job.get("active", {})
+        active_details = job.get("active_details", {}) if isinstance(job.get("active_details", {}), dict) else {}
         if isinstance(active_raw, dict):
             active = [
-                {"file": fn, "elapsed_sec": round(max(0.0, now - float(started)), 1)}
+                {
+                    "file": fn,
+                    "elapsed_sec": round(max(0.0, now - float(started)), 1),
+                    "preprocess": active_details.get(fn),
+                }
                 for fn, started in active_raw.items()
             ]
         else:
@@ -1318,6 +1949,10 @@ def batch_progress():
             "avg_item_sec": round(avg_item_sec, 3) if avg_item_sec is not None else None,
             "server_error_count": job.get("server_error_count", 0),
             "abort_reason": job.get("abort_reason"),
+            "preprocess_completed": job.get("preprocess_completed"),
+            "preprocess_total": job.get("preprocess_total"),
+            "llama_cpp_preprocess_unload": job.get("llama_cpp_preprocess_unload"),
+            "llama_cpp_preprocess_reload": job.get("llama_cpp_preprocess_reload"),
         }
     return jsonify(out)
 

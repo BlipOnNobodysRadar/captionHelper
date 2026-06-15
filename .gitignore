@@ -33,3 +33,8 @@ Thumbs.db
 *.zip
 .caption_jobs/
 .caption_jobs/*.tmp
+
+# CaptionHelper private metadata
+*.caption_meta.json
+*.caption_error.json
+caption_regions_*.json

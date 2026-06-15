@@ -193,6 +193,40 @@ async function loadBackendConfig() {
     if (maxOutputTokens && Number.isFinite(Number(cfg.max_output_tokens))) {
       maxOutputTokens.value = cfg.max_output_tokens;
     }
+    if (cfg.region_preprocess) {
+      const regionDetector = document.getElementById('regionDetector');
+      const regionSegmenter = document.getElementById('regionSegmenter');
+      const regionOcr = document.getElementById('regionOcr');
+      const regionMaxRegions = document.getElementById('regionMaxRegions');
+      const regionOcrThreshold = document.getElementById('regionOcrThreshold');
+      const regionDetectorBoxThreshold = document.getElementById('regionDetectorBoxThreshold');
+      const regionDetectorTextThreshold = document.getElementById('regionDetectorTextThreshold');
+      const regionDevice = document.getElementById('regionDevice');
+      const regionModelRoot = document.getElementById('regionModelRoot');
+      const regionAutoDownload = document.getElementById('regionAutoDownload');
+      const regionLoadModels = document.getElementById('regionLoadModels');
+      const regionDetectorModelPath = document.getElementById('regionDetectorModelPath');
+      const regionSegmenterModelPath = document.getElementById('regionSegmenterModelPath');
+      const regionOcrModelPath = document.getElementById('regionOcrModelPath');
+      if (regionDetector) regionDetector.value = cfg.region_preprocess.detector || regionDetector.value;
+      if (regionSegmenter) regionSegmenter.value = 'none';
+      if (regionOcr) regionOcr.value = 'none';
+      if (regionMaxRegions) regionMaxRegions.value = cfg.region_preprocess.max_regions ?? regionMaxRegions.value;
+      if (regionOcrThreshold) regionOcrThreshold.value = cfg.region_preprocess.ocr_threshold ?? regionOcrThreshold.value;
+      if (regionDetectorBoxThreshold) regionDetectorBoxThreshold.value = cfg.region_preprocess.detector_box_threshold ?? regionDetectorBoxThreshold.value;
+      if (regionDetectorTextThreshold) regionDetectorTextThreshold.value = cfg.region_preprocess.detector_text_threshold ?? regionDetectorTextThreshold.value;
+      if (regionDevice) regionDevice.value = cfg.region_preprocess.device || regionDevice.value;
+      if (regionModelRoot) regionModelRoot.value = cfg.region_preprocess.model_root || '';
+      if (regionAutoDownload) regionAutoDownload.checked = Boolean(cfg.region_preprocess.auto_download);
+      if (regionLoadModels) regionLoadModels.checked = Boolean(cfg.region_preprocess.load_models);
+      if (regionDetectorModelPath) regionDetectorModelPath.value = cfg.region_preprocess.detector_model_path || '';
+      if (regionSegmenterModelPath) regionSegmenterModelPath.value = cfg.region_preprocess.segmenter_model_path || '';
+      if (regionOcrModelPath) regionOcrModelPath.value = cfg.region_preprocess.ocr_model_path || '';
+    }
+    const llamaUnload = document.getElementById('llamaCppUnloadDuringPreprocess');
+    if (llamaUnload && cfg.llama_cpp_model_management) {
+      llamaUnload.checked = Boolean(cfg.llama_cpp_model_management.unload_during_preprocess);
+    }
 
     populatePresets(cfg.caption_presets);
 
@@ -223,6 +257,31 @@ function addMsg(who, text) {
   chatLog.scrollTop = chatLog.scrollHeight;
 }
 
+function formatRegionPreprocessNotice(summary) {
+  if (!summary || !summary.enabled) return '';
+  const warnings = Array.isArray(summary.warnings) ? summary.warnings.filter(Boolean) : [];
+  const count = Number(summary.candidate_count || 0);
+  const prefix = summary.skipped
+    ? '⚠️ Region preprocessing was skipped or produced no usable candidates.'
+    : `ℹ️ Region preprocessing produced ${count} candidate${count === 1 ? '' : 's'}.`;
+  if (!warnings.length) return prefix;
+  return `${prefix}\n${warnings.map(w => `• ${w}`).join('\n')}`;
+}
+
+function formatModelManagementNotice(modelManagement) {
+  if (!modelManagement) return '';
+  const unload = modelManagement.unload_before_preprocess;
+  const reload = modelManagement.reload_after_preprocess;
+  const lines = [];
+  if (unload && !unload.ok) {
+    lines.push(`⚠️ llama.cpp model unload did not happen: ${unload.reason || unload.error || 'unknown error'}`);
+  }
+  if (reload && !reload.ok) {
+    lines.push(`⚠️ llama.cpp model reload did not complete: ${reload.reason || reload.error || 'unknown error'}`);
+  }
+  return lines.join('\n');
+}
+
 async function postChatCaption(file) {
   const fd = new FormData();
   fd.append('file', file);
@@ -233,6 +292,23 @@ async function postChatCaption(file) {
   fd.append('prefill', document.getElementById('prefill').value);
   fd.append('max_image_side', document.getElementById('maxImageSide').value);
   fd.append('max_output_tokens', document.getElementById('maxOutputTokens').value);
+  fd.append('enable_region_preprocess', document.getElementById('enableRegionPreprocess').checked);
+  fd.append('validate_ideogram_json', document.getElementById('validateIdeogramJson').checked);
+  fd.append('region_detector', document.getElementById('regionDetector').value);
+  fd.append('region_segmenter', document.getElementById('regionSegmenter').value);
+  fd.append('region_ocr', document.getElementById('regionOcr').value);
+  fd.append('region_max_regions', document.getElementById('regionMaxRegions').value);
+  fd.append('region_ocr_threshold', document.getElementById('regionOcrThreshold').value);
+  fd.append('region_detector_box_threshold', document.getElementById('regionDetectorBoxThreshold').value);
+  fd.append('region_detector_text_threshold', document.getElementById('regionDetectorTextThreshold').value);
+  fd.append('region_device', document.getElementById('regionDevice').value);
+  fd.append('region_model_root', document.getElementById('regionModelRoot').value);
+  fd.append('region_auto_download', document.getElementById('regionAutoDownload').checked);
+  fd.append('region_load_models', document.getElementById('regionLoadModels').checked);
+  fd.append('region_detector_model_path', document.getElementById('regionDetectorModelPath').value);
+  fd.append('region_segmenter_model_path', document.getElementById('regionSegmenterModelPath').value);
+  fd.append('region_ocr_model_path', document.getElementById('regionOcrModelPath').value);
+  fd.append('llama_cpp_unload_during_preprocess', document.getElementById('llamaCppUnloadDuringPreprocess').checked);
   fd.append('use_existing_caption', document.getElementById('useExistingCaption').checked);
   fd.append('existing_caption', document.getElementById('existingCaption').value);
   appendMetadataFields(fd);
@@ -246,14 +322,20 @@ sendBtn.addEventListener('click', async () => {
   const file = clipInput.files?.[0];
   if (!file) { addMsg('assistant', 'Attach a file first.'); return; }
   addMsg('user', `Attached: ${file.name}`);
-  addMsg('assistant', 'Thinking... preparing inputs and querying the local vision backend');
+  const regionEnabled = document.getElementById('enableRegionPreprocess')?.checked;
+  const autoDownload = document.getElementById('regionAutoDownload')?.checked;
+  const downloadHint = regionEnabled && autoDownload ? ' If selected preprocessing models are missing, they will be downloaded before captioning.' : '';
+  addMsg('assistant', 'Thinking... preparing inputs and querying the local vision backend' + downloadHint);
 
   const out = await postChatCaption(file);
   if (out.error) {
     addMsg('assistant', 'Error: ' + out.error);
   } else {
     const framesInfo = (typeof out.frames_used === 'number') ? ` [inputs: ${out.frames_used}] ` : ' ';
-    addMsg('assistant', framesInfo + out.caption);
+    const preprocessNotice = formatRegionPreprocessNotice(out.region_preprocess_summary);
+    const modelNotice = formatModelManagementNotice(out.model_management);
+    const notices = [preprocessNotice, modelNotice].filter(Boolean).join('\n\n');
+    addMsg('assistant', (notices ? notices + '\n\n' : '') + framesInfo + out.caption);
   }
 });
 
@@ -307,7 +389,11 @@ function renderActiveFiles(active) {
   activeFiles.textContent = active.map(item => {
     const file = typeof item === 'string' ? item : item.file;
     const elapsed = typeof item === 'string' ? null : item.elapsed_sec;
-    return elapsed === null || elapsed === undefined ? `• ${file}` : `• ${file} (${formatDuration(elapsed)})`;
+    const preprocess = typeof item === 'string' ? null : item.preprocess;
+    const progress = preprocess && preprocess.message
+      ? ` — ${preprocess.message}${Number.isFinite(Number(preprocess.percent)) ? ` (${Math.round(Number(preprocess.percent))}%)` : ''}`
+      : '';
+    return elapsed === null || elapsed === undefined ? `• ${file}${progress}` : `• ${file} (${formatDuration(elapsed)})${progress}`;
   }).join('\n');
 }
 
@@ -320,6 +406,23 @@ function getBatchBody() {
     num_frames: Number(document.getElementById('numFrames').value),
     max_image_side: Number(document.getElementById('maxImageSide').value),
     max_output_tokens: Number(document.getElementById('maxOutputTokens').value),
+    enable_region_preprocess: document.getElementById('enableRegionPreprocess').checked,
+    validate_ideogram_json: document.getElementById('validateIdeogramJson').checked,
+    region_detector: document.getElementById('regionDetector').value,
+    region_segmenter: document.getElementById('regionSegmenter').value,
+    region_ocr: document.getElementById('regionOcr').value,
+    region_max_regions: Number(document.getElementById('regionMaxRegions').value),
+    region_ocr_threshold: Number(document.getElementById('regionOcrThreshold').value),
+    region_detector_box_threshold: Number(document.getElementById('regionDetectorBoxThreshold').value),
+    region_detector_text_threshold: Number(document.getElementById('regionDetectorTextThreshold').value),
+    region_device: document.getElementById('regionDevice').value,
+    region_model_root: document.getElementById('regionModelRoot').value,
+    region_auto_download: document.getElementById('regionAutoDownload').checked,
+    region_load_models: document.getElementById('regionLoadModels').checked,
+    region_detector_model_path: document.getElementById('regionDetectorModelPath').value,
+    region_segmenter_model_path: document.getElementById('regionSegmenterModelPath').value,
+    region_ocr_model_path: document.getElementById('regionOcrModelPath').value,
+    llama_cpp_unload_during_preprocess: document.getElementById('llamaCppUnloadDuringPreprocess').checked,
     max_concurrent: Number(document.getElementById('maxConcurrent').value),
     abort_after_server_errors: Number(document.getElementById('abortAfterServerErrors').value),
     sampling_type: document.getElementById('samplingType').value,
@@ -352,7 +455,13 @@ async function pollProgress() {
 
     const parallel = out.max_concurrent || 1;
     const activeCount = out.active_count || (Array.isArray(out.active) ? out.active.length : 0);
-    batchStatus.textContent = `${out.status} — ${completed}/${total} — parallel: ${parallel} — active: ${activeCount}`;
+    if (out.status === 'preprocessing') {
+      const pc = Number(out.preprocess_completed || 0);
+      const pt = Number(out.preprocess_total || total || 0);
+      batchStatus.textContent = `preprocessing — ${pc}/${pt} — active: ${activeCount}`;
+    } else {
+      batchStatus.textContent = `${out.status} — ${completed}/${total} — parallel: ${parallel} — active: ${activeCount}`;
+    }
     if (out.abort_reason) {
       batchStatus.textContent += ` — ${out.abort_reason}`;
     }
@@ -374,11 +483,19 @@ async function pollProgress() {
         if (r.ok) {
           const mediaOut = r.media_out ? ` + ${r.media_out}` : '';
           logBatch(`✓ ${r.file} -> ${r.out}${mediaOut}${took}`);
+          const notice = formatRegionPreprocessNotice(r.region_preprocess_summary);
+          if (notice) logBatch(notice);
+          const modelNotice = formatModelManagementNotice(r.model_management);
+          if (modelNotice) logBatch(modelNotice);
         }
         else if (r.skipped) logBatch(`↷ ${r.file} (skipped: ${r.reason})${took}`);
         else {
           const code = r.status_code ? ` [HTTP ${r.status_code}]` : '';
           logBatch(`✗ ${r.file}${code}: ${r.error}${took}`);
+          const notice = formatRegionPreprocessNotice(r.region_preprocess_summary);
+          if (notice) logBatch(notice);
+          const modelNotice = formatModelManagementNotice(r.model_management);
+          if (modelNotice) logBatch(modelNotice);
         }
       }
       lastResultCount = out.results.length;
