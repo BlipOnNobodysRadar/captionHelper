@@ -198,6 +198,57 @@ def _slugify_preset_id(name:str)->str:
     return slug or "preset"
 
 
+def _coerce_preset_saved_settings(raw:dict)->dict:
+    if not isinstance(raw, dict):
+        return {}
+    string_fields = (
+        "target_folder",
+        "model",
+        "prefill",
+        "sampling_type",
+        "filename_affix_text",
+        "filename_affix_position",
+        "output_subdir_name",
+        "existing_caption",
+        "source_tags",
+        "character_tags",
+        "copyright_tags",
+        "artist_tags",
+        "general_tags",
+        "rating_tags",
+        "quality_tags",
+    )
+    bool_fields = (
+        "overwrite",
+        "prepend_existing",
+        "output_to_subdir",
+        "use_existing_caption",
+        "image_mode",
+    )
+    int_fields = {
+        "num_frames": (1, 32),
+        "max_image_side": (0, 8192),
+        "max_output_tokens": (0, 8192),
+        "max_concurrent": (1, MAX_BATCH_CONCURRENCY),
+        "abort_after_server_errors": (0, 999),
+    }
+    settings = {}
+    for field in string_fields:
+        if field in raw:
+            settings[field] = str(raw.get(field) or "")
+    for field in bool_fields:
+        if field in raw:
+            settings[field] = bool(raw.get(field))
+    for field, (minimum, maximum) in int_fields.items():
+        if field in raw:
+            default = DEFAULT_MAX_OUTPUT_TOKENS if field == "max_output_tokens" else minimum
+            settings[field] = _clamp_int(raw.get(field), default, minimum, maximum)
+    if settings.get("sampling_type") not in (None, "", "uniform", "head"):
+        settings["sampling_type"] = "uniform"
+    if settings.get("filename_affix_position") not in (None, "", "prefix", "suffix"):
+        settings["filename_affix_position"] = "prefix"
+    return settings
+
 def _coerce_user_preset(raw:dict)->dict:
     if not isinstance(raw, dict):
         raise ValueError("Preset must be an object")
@@ -219,7 +270,6 @@ def _coerce_user_preset(raw:dict)->dict:
     base_id = _slugify_preset_id(base_id)
     preset_id = f"user:{base_id}"
 
-
     media = str(raw.get("media") or "image").strip().lower()
     if media not in {"image", "video"}:
         media = "image"
@@ -230,7 +280,7 @@ def _coerce_user_preset(raw:dict)->dict:
         max_output_tokens = DEFAULT_MAX_OUTPUT_TOKENS
     max_output_tokens = max(0, min(8192, max_output_tokens))
 
-    return {
+    preset = {
         "id": preset_id,
         "name": name,
         "description": str(raw.get("description") or "User-saved preset.").strip(),
@@ -242,6 +292,10 @@ def _coerce_user_preset(raw:dict)->dict:
         "source": "user",
         "readonly": False,
     }
+    saved_settings = _coerce_preset_saved_settings(raw.get("saved_settings") or {})
+    if saved_settings:
+        preset["saved_settings"] = saved_settings
+    return preset
 
 
 def load_user_presets()->list:
