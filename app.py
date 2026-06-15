@@ -1044,7 +1044,12 @@ def _caption_with_validation(imgs, system_prompt, model, prefill, media_kind, ma
         retried = True
         caption = call_vision_api(imgs, system_prompt, model, prefill=prefill, media_kind=media_kind, max_output_tokens=max_output_tokens, user_prompt=retry_prompt)
         validation = validate_ideogram4_json_caption(caption)
-    return caption, {"validation": validation, "retried": retried}
+    return caption, {
+        "validation": validation,
+        "retried": retried,
+        "prompt_used": retry_prompt if retried else user_prompt,
+        "initial_user_prompt": user_prompt,
+    }
 
 # ------------------ Simple chat route ------------------
 @app.route("/")
@@ -1236,7 +1241,8 @@ def chat_caption():
             user_prompt = _augment_prompt_with_region_candidates(user_prompt, region_payload)
         caption, caption_meta = _caption_with_validation(imgs, system_prompt_in, model, prefill, media_kind, max_output_tokens, user_prompt, validate_json=validate_ideogram_json)
         preprocess_summary = _region_preprocess_summary(region_payload) if enable_region_preprocess else {"enabled": False, "warnings": [], "skipped": False}
-        return jsonify({"caption": caption, "frames_used": len(imgs), "region_preprocess": region_payload, "region_preprocess_summary": preprocess_summary, "model_management": model_management, **caption_meta})
+        public_caption_meta = {k: v for k, v in caption_meta.items() if k not in ("prompt_used", "initial_user_prompt")}
+        return jsonify({"caption": caption, "frames_used": len(imgs), "region_preprocess": region_payload, "region_preprocess_summary": preprocess_summary, "model_management": model_management, **public_caption_meta})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     finally:
