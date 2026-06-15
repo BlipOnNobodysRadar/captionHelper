@@ -577,8 +577,16 @@ def run_paddleocr(path: str, width: int, height: int, threshold: float) -> tuple
         from paddleocr import PaddleOCR  # type: ignore
     except Exception as exc:
         return [], [f"PaddleOCR unavailable: {exc}"]
-    ocr = PaddleOCR(use_textline_orientation=True, lang="en")
-    result = ocr.predict(path) if hasattr(ocr, "predict") else ocr.ocr(path, cls=True)
+    try:
+        try:
+            ocr = PaddleOCR(use_textline_orientation=True, lang="en")
+        except TypeError:
+            # Older PaddleOCR releases use `use_angle_cls`; newer releases use
+            # `use_textline_orientation`.
+            ocr = PaddleOCR(use_angle_cls=True, lang="en")
+        result = ocr.predict(path) if hasattr(ocr, "predict") else ocr.ocr(path, cls=True)
+    except Exception as exc:
+        return [], [f"PaddleOCR failed: {exc}"]
     items = result if isinstance(result, list) else []
     for page in items:
         if isinstance(page, dict):

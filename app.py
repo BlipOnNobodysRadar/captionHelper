@@ -503,6 +503,8 @@ def _run_region_preprocess(image_path:str, tags_text:str="", source_caption_path
         out_path = fh.name
     with tempfile.NamedTemporaryFile(prefix="caption_regions_progress_", suffix=".json", delete=False) as fh:
         progress_path = fh.name
+    with tempfile.NamedTemporaryFile(prefix="caption_regions_stderr_", suffix=".log", delete=False) as fh:
+        stderr_path = fh.name
     cmd = [
         sys.executable, REGION_PREPROCESS_SCRIPT,
         "--image", image_path,
@@ -530,7 +532,8 @@ def _run_region_preprocess(image_path:str, tags_text:str="", source_caption_path
     if source_caption_path:
         cmd.extend(["--tags", source_caption_path])
     try:
-        process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True)
+        stderr_fh = open(stderr_path, "w", encoding="utf-8")
+        process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=stderr_fh, text=True)
         last_progress = None
         started_at = time.time()
         while process.poll() is None:
@@ -549,14 +552,20 @@ def _run_region_preprocess(image_path:str, tags_text:str="", source_caption_path
                 raise subprocess.TimeoutExpired(cmd, 600)
             time.sleep(0.5)
         process.communicate()
+        stderr_fh.close()
         completed_returncode = process.returncode
         if progress_callback:
             progress_callback({"stage": "reading_results", "message": "Reading region preprocessing results...", "percent": 100})
         if completed_returncode != 0:
+            try:
+                with open(stderr_path, "r", encoding="utf-8", errors="replace") as fh:
+                    stderr_text = _shorten(fh.read(), limit=4000)
+            except Exception:
+                stderr_text = ""
             return {
                 "regions": [],
                 "ocr": [],
-                "error": "region preprocessor failed",
+                "error": stderr_text or "region preprocessor failed",
                 "command": cmd,
             }
         with open(out_path, "r", encoding="utf-8") as fh:
@@ -570,6 +579,10 @@ def _run_region_preprocess(image_path:str, tags_text:str="", source_caption_path
             pass
         try:
             os.remove(progress_path)
+        except Exception:
+            pass
+        try:
+            os.remove(stderr_path)
         except Exception:
             pass
 
@@ -610,7 +623,7 @@ def _region_preprocess_summary(region_payload:dict|None)->dict:
         for name, status in model_load_status.items()
         if isinstance(status, dict) and status.get("loaded") is False
     ]
-    skipped = bool(selected) and candidates == 0 and bool(warnings or failed_loads)
+    skipped = candidates == 0 and bool(warnings or failed_loads or region_payload.get("error"))
     return {
         "enabled": True,
         "skipped": skipped,
@@ -773,6 +786,17 @@ def _shorten(text:str, limit:int=700)->str:
     return text[:limit].rstrip() + " …"
 
 
+def _clean_model_caption_output(text:str)->str:
+    text = (text or "").strip()
+    # Some llama.cpp/Jinja reasoning combinations can leak channel markers into
+    # the assistant content even with reasoning disabled. Strip only the known
+    # wrapper tokens, leaving the actual caption/JSON untouched.
+    text = re.sub(r"^\s*<\|?channel\|?>thought\s*<channel\|>\s*", "", text)
+    text = re.sub(r"^\s*<\|?channel\|?>[^<\n]*\s*", "", text)
+    text = text.replace("<|channel|>thought", "").replace("<|channel>thought", "").replace("<channel|>", "")
+    return text.strip()
+
+
 def _api_error_detail(response):
     body_text = ""
     try:
@@ -845,7 +869,7 @@ def call_vision_api(images_data_urls, system_prompt:str, model:str, prefill:str=
             if r.ok:
                 data = r.json()
                 content = data["choices"][0]["message"].get("content")
-                caption = (content or "").strip()
+                caption = _clean_model_caption_output(content or "")
                 if caption:
                     return caption
 
