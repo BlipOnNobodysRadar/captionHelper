@@ -220,6 +220,57 @@ def _slugify_preset_id(name:str)->str:
     return slug or "preset"
 
 
+def _coerce_preset_saved_settings(raw:dict)->dict:
+    if not isinstance(raw, dict):
+        return {}
+    string_fields = (
+        "target_folder",
+        "model",
+        "prefill",
+        "sampling_type",
+        "filename_affix_text",
+        "filename_affix_position",
+        "output_subdir_name",
+        "existing_caption",
+        "source_tags",
+        "character_tags",
+        "copyright_tags",
+        "artist_tags",
+        "general_tags",
+        "rating_tags",
+        "quality_tags",
+    )
+    bool_fields = (
+        "overwrite",
+        "prepend_existing",
+        "output_to_subdir",
+        "use_existing_caption",
+        "image_mode",
+    )
+    int_fields = {
+        "num_frames": (1, 32),
+        "max_image_side": (0, 8192),
+        "max_output_tokens": (0, 8192),
+        "max_concurrent": (1, MAX_BATCH_CONCURRENCY),
+        "abort_after_server_errors": (0, 999),
+    }
+    settings = {}
+    for field in string_fields:
+        if field in raw:
+            settings[field] = str(raw.get(field) or "")
+    for field in bool_fields:
+        if field in raw:
+            settings[field] = bool(raw.get(field))
+    for field, (minimum, maximum) in int_fields.items():
+        if field in raw:
+            default = DEFAULT_MAX_OUTPUT_TOKENS if field == "max_output_tokens" else minimum
+            settings[field] = _clamp_int(raw.get(field), default, minimum, maximum)
+    if settings.get("sampling_type") not in (None, "", "uniform", "head"):
+        settings["sampling_type"] = "uniform"
+    if settings.get("filename_affix_position") not in (None, "", "prefix", "suffix"):
+        settings["filename_affix_position"] = "prefix"
+    return settings
+
 def _coerce_user_preset(raw:dict)->dict:
     if not isinstance(raw, dict):
         raise ValueError("Preset must be an object")
@@ -241,7 +292,6 @@ def _coerce_user_preset(raw:dict)->dict:
     base_id = _slugify_preset_id(base_id)
     preset_id = f"user:{base_id}"
 
-
     media = str(raw.get("media") or "image").strip().lower()
     if media not in {"image", "video"}:
         media = "image"
@@ -252,7 +302,7 @@ def _coerce_user_preset(raw:dict)->dict:
         max_output_tokens = DEFAULT_MAX_OUTPUT_TOKENS
     max_output_tokens = max(0, min(8192, max_output_tokens))
 
-    return {
+    preset = {
         "id": preset_id,
         "name": name,
         "description": str(raw.get("description") or "User-saved preset.").strip(),
@@ -264,6 +314,10 @@ def _coerce_user_preset(raw:dict)->dict:
         "source": "user",
         "readonly": False,
     }
+    saved_settings = _coerce_preset_saved_settings(raw.get("saved_settings") or {})
+    if saved_settings:
+        preset["saved_settings"] = saved_settings
+    return preset
 
 
 def load_user_presets()->list:
@@ -1306,6 +1360,16 @@ def _copy_media_if_needed(source_path:str, output_paths:dict, overwrite:bool):
         return
     shutil.copy2(source_path, dest_path)
 
+
+def _resolve_existing_caption_for_prompt(source_txt:str, out_txt:str)->str:
+    # Copy-output mode must treat the source sidecar as the immutable original.
+    # When overwrite is enabled, only the copied/generated caption should be
+    # replaced; the prompt should not accidentally ground on an older copied
+    # output when the original sidecar exists.
+    if os.path.exists(source_txt):
+        return source_txt
+    return out_txt
+
 def _write_caption_error_debug_file(output_paths:dict, error:VisionAPIRequestError):
     raw_body = (error.body or "").strip()
     if not raw_body:
@@ -1342,10 +1406,13 @@ def _write_caption_metadata(path:str, payload:dict)->None:
 
 
 def _select_targets(folder:str, image_mode:bool):
-    if image_mode:
-        selected = [p for p in os.listdir(folder) if allowed_image(os.path.join(folder, p))]
-    else:
-        selected = [p for p in os.listdir(folder) if allowed_video(os.path.join(folder, p))]
+    def is_processable_file(name:str)->bool:
+        path = os.path.join(folder, name)
+        if not os.path.isfile(path):
+            return False
+        return allowed_image(path) if image_mode else allowed_video(path)
+
+    selected = [p for p in os.listdir(folder) if is_processable_file(p)]
     selected.sort()
     return selected
 
