@@ -455,7 +455,13 @@ async function pollProgress() {
 
     const parallel = out.max_concurrent || 1;
     const activeCount = out.active_count || (Array.isArray(out.active) ? out.active.length : 0);
-    batchStatus.textContent = `${out.status} — ${completed}/${total} — parallel: ${parallel} — active: ${activeCount}`;
+    if (out.status === 'preprocessing') {
+      const pc = Number(out.preprocess_completed || 0);
+      const pt = Number(out.preprocess_total || total || 0);
+      batchStatus.textContent = `preprocessing — ${pc}/${pt} — active: ${activeCount}`;
+    } else {
+      batchStatus.textContent = `${out.status} — ${completed}/${total} — parallel: ${parallel} — active: ${activeCount}`;
+    }
     if (out.abort_reason) {
       batchStatus.textContent += ` — ${out.abort_reason}`;
     }

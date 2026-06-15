@@ -1323,6 +1323,27 @@ def _clamp_int(value, default:int, minimum:int=1, maximum:int=16)->int:
     return max(minimum, min(maximum, n))
 
 
+def _read_grounding_text(in_path:str, out_txt:str, use_existing:bool)->str:
+    if not use_existing:
+        return ""
+    source_base, _ = os.path.splitext(in_path)
+    source_txt = source_base + ".txt"
+    grounding_txt = source_txt if os.path.exists(source_txt) else out_txt
+    if not os.path.exists(grounding_txt):
+        return ""
+    try:
+        with open(grounding_txt, "r", encoding="utf-8") as fh:
+            return fh.read().strip()
+    except Exception:
+        return ""
+
+
+def _target_would_skip(in_path:str, params:dict)->bool:
+    output_paths = _build_output_paths(in_path, params)
+    out_txt = output_paths["caption"]
+    return os.path.exists(out_txt) and (not params.get("overwrite")) and (not params.get("prepend_existing"))
+
+
 def _process_one_target(fn:str, params:dict):
     folder = params["target_folder"]
     image_mode = params["image_mode"]
@@ -1356,13 +1377,7 @@ def _process_one_target(fn:str, params:dict):
     try:
         old_text = ""
         if use_existing:
-            grounding_txt = source_txt if os.path.exists(source_txt) else out_txt
-            if os.path.exists(grounding_txt):
-                try:
-                    with open(grounding_txt, "r", encoding="utf-8") as fh:
-                        old_text = fh.read().strip()
-                except Exception:
-                    old_text = ""
+            old_text = _read_grounding_text(in_path, out_txt, use_existing)
 
         # Prepare inputs. This happens inside the worker, so multiple files can be prepared
         # and sent to the local vision API at once.
@@ -1378,22 +1393,27 @@ def _process_one_target(fn:str, params:dict):
         user_prompt = _render_user_template(user_template, context)
         region_payload = None
         model_management = None
+        preprocessed = (params.get("preprocessed_regions") or {}).get(fn) if isinstance(params.get("preprocessed_regions"), dict) else None
+        if isinstance(preprocessed, dict):
+            region_payload = preprocessed.get("region_payload")
+            model_management = preprocessed.get("model_management")
         if image_mode and enable_region_preprocess:
-            unload_result = _maybe_unload_llamacpp_for_preprocess(model, enabled=bool(params.get("llama_cpp_unload_during_preprocess", LLAMA_CPP_UNLOAD_DURING_PREPROCESS)))
-            def progress_callback(progress:dict):
-                job_id = params.get("job_id")
-                if not job_id:
-                    return
-                with JOBS_LOCK:
-                    job = JOBS.get(job_id)
-                    if not job:
+            if region_payload is None:
+                unload_result = _maybe_unload_llamacpp_for_preprocess(model, enabled=bool(params.get("llama_cpp_unload_during_preprocess", LLAMA_CPP_UNLOAD_DURING_PREPROCESS)))
+                def progress_callback(progress:dict):
+                    job_id = params.get("job_id")
+                    if not job_id:
                         return
-                    active_details = job.setdefault("active_details", {})
-                    active_details[fn] = progress
+                    with JOBS_LOCK:
+                        job = JOBS.get(job_id)
+                        if not job:
+                            return
+                        active_details = job.setdefault("active_details", {})
+                        active_details[fn] = progress
 
-            region_payload = _run_region_preprocess(in_path, tags_text=_detector_tags_from_context(context), source_caption_path=None, params=params, progress_callback=progress_callback)
-            reload_result = _maybe_reload_llamacpp_after_preprocess(model, unload_result)
-            model_management = {"unload_before_preprocess": unload_result, "reload_after_preprocess": reload_result}
+                region_payload = _run_region_preprocess(in_path, tags_text=_detector_tags_from_context(context), source_caption_path=None, params=params, progress_callback=progress_callback)
+                reload_result = _maybe_reload_llamacpp_after_preprocess(model, unload_result)
+                model_management = {"unload_before_preprocess": unload_result, "reload_after_preprocess": reload_result}
             user_prompt = _augment_prompt_with_region_candidates(user_prompt, region_payload)
 
         caption, caption_meta = _caption_with_validation(imgs, system_prompt_in, model, prefill, media_kind, max_output_tokens, user_prompt, validate_json=validate_ideogram_json)
@@ -1502,6 +1522,76 @@ def _run_batch(job_id:str):
         job["abort_reason"] = None
         job["selected_targets"] = targets
         _persist_job(job)
+
+    if image_mode and params.get("enable_region_preprocess"):
+        unload_enabled = bool(params.get("llama_cpp_unload_during_preprocess", LLAMA_CPP_UNLOAD_DURING_PREPROCESS))
+        unload_result = _maybe_unload_llamacpp_for_preprocess(params.get("model") or DEFAULT_MODEL, enabled=unload_enabled)
+        preprocessed_regions = {}
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+            if job:
+                job["status"] = "preprocessing"
+                job["preprocess_completed"] = 0
+                job["preprocess_total"] = len(targets)
+                job["llama_cpp_preprocess_unload"] = unload_result
+                _persist_job(job)
+
+        for fn in targets:
+            in_path = os.path.join(folder, fn)
+            if _target_would_skip(in_path, params):
+                with JOBS_LOCK:
+                    job = JOBS.get(job_id)
+                    if job:
+                        job["preprocess_completed"] = int(job.get("preprocess_completed", 0)) + 1
+                continue
+            output_paths = _build_output_paths(in_path, params)
+            old_text = _read_grounding_text(in_path, output_paths["caption"], bool(params.get("use_existing_caption")))
+            context = _context_from_request_values(params.get("metadata_values", {}), old_text, image_mode=True, input_count=1)
+
+            def progress_callback(progress:dict, file_name=fn):
+                with JOBS_LOCK:
+                    job = JOBS.get(job_id)
+                    if not job:
+                        return
+                    active = job.setdefault("active", {})
+                    active[file_name] = active.get(file_name, time.time())
+                    active_details = job.setdefault("active_details", {})
+                    active_details[file_name] = progress
+                    job["current"] = file_name
+
+            region_payload = _run_region_preprocess(
+                in_path,
+                tags_text=_detector_tags_from_context(context),
+                source_caption_path=None,
+                params=params,
+                progress_callback=progress_callback,
+            )
+            preprocessed_regions[fn] = {
+                "region_payload": region_payload,
+                "model_management": {"unload_before_preprocess": unload_result, "reload_after_preprocess": None},
+            }
+            with JOBS_LOCK:
+                job = JOBS.get(job_id)
+                if job:
+                    job.setdefault("active", {}).pop(fn, None)
+                    job.setdefault("active_details", {}).pop(fn, None)
+                    job["current"] = None
+                    job["preprocess_completed"] = int(job.get("preprocess_completed", 0)) + 1
+                    _persist_job(job)
+
+        reload_result = _maybe_reload_llamacpp_after_preprocess(params.get("model") or DEFAULT_MODEL, unload_result)
+        for item in preprocessed_regions.values():
+            item["model_management"]["reload_after_preprocess"] = reload_result
+        params["preprocessed_regions"] = preprocessed_regions
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+            if job:
+                job["status"] = "running"
+                job["llama_cpp_preprocess_reload"] = reload_result
+                job["active"] = {}
+                job["active_details"] = {}
+                job["current"] = None
+                _persist_job(job)
 
     def worker(worker_id:int):
         while True:
@@ -1825,6 +1915,10 @@ def batch_progress():
             "avg_item_sec": round(avg_item_sec, 3) if avg_item_sec is not None else None,
             "server_error_count": job.get("server_error_count", 0),
             "abort_reason": job.get("abort_reason"),
+            "preprocess_completed": job.get("preprocess_completed"),
+            "preprocess_total": job.get("preprocess_total"),
+            "llama_cpp_preprocess_unload": job.get("llama_cpp_preprocess_unload"),
+            "llama_cpp_preprocess_reload": job.get("llama_cpp_preprocess_reload"),
         }
     return jsonify(out)
 
