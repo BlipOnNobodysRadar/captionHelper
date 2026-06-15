@@ -109,13 +109,14 @@
               </select>
               <select id="regionSegmenter">
                 <option value="none" selected>no SAM2</option>
-                <option value="sam2">SAM2 refine</option>
+                <option value="sam2" disabled>SAM2 refine (temporarily disabled)</option>
               </select>
               <select id="regionOcr">
-                <option value="paddleocr" selected>PaddleOCR</option>
-                <option value="none">no OCR</option>
+                <option value="none" selected>no OCR</option>
+                <option value="paddleocr" disabled>PaddleOCR (temporarily disabled)</option>
               </select>
             </div>
+            <small style="color:#8a90a6">SAM2 and OCR hooks are disabled for now while their runtime failures are isolated; GroundingDINO remains enabled.</small>
           </div>
           <div class="row">
             <label>Max regions / OCR threshold:</label>

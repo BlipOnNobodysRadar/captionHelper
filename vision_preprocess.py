@@ -668,6 +668,15 @@ def main() -> int:
     warnings: list[str] = []
     regions: list[RegionCandidate] = []
     detector_diagnostics: dict[str, Any] = {}
+    # Keep the SAM2/PaddleOCR integration code in this file for future fixes, but
+    # short-circuit those runtime paths before asset resolution/loading. Current
+    # local testing showed they can abort the whole preprocessing subprocess.
+    if args.segmenter != "none":
+        warnings.append("SAM2 refinement is temporarily disabled in CaptionHelper while runtime issues are isolated; continuing without segmentation.")
+        args.segmenter = "none"
+    if args.ocr != "none":
+        warnings.append("OCR preprocessing is temporarily disabled in CaptionHelper while PaddleOCR runtime failures are isolated; continuing without OCR.")
+        args.ocr = "none"
     prompts = build_detector_prompts(tags_text)
     model_assets: dict[str, Any] = {}
 

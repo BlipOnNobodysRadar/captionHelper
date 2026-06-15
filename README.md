@@ -292,28 +292,30 @@ The lightweight checked-in `vision_preprocess.py` provides the orchestration con
 
 - `--detector groundingdino` / `groundingdino1.5` is the intended object-box source.
 - `--segmenter sam2` is reserved for box-prompted mask refinement; SAM2 is not used as an object discoverer by itself.
-- `--ocr paddleocr` runs PaddleOCR when installed and filters text by confidence.
+- `--ocr paddleocr` is reserved for OCR, but is temporarily disabled at runtime.
 - `--detector florence2` is exposed as an alternative prototype path.
+
+Temporarily, CaptionHelper exposes only GroundingDINO in the UI. SAM2 and PaddleOCR hooks remain in the script for future work, but are disabled at runtime because local testing showed unstable failures in those integrations.
 
 GroundingDINO selections run through the `transformers` zero-shot object detection pipeline when the model and runtime load successfully. If GroundingDINO runs but returns zero candidates, lower the detector box/text thresholds in the UI and/or add simpler object prompts/tags.
 
 If GroundingDINO fails with CUDA out-of-memory while Gemma is loaded in a separate classic `llama-server -m ...` process, either run llama.cpp in router mode and enable the router unload/reload checkbox, or set **Preprocessing device** to CPU. CPU preprocessing is slower but avoids competing for VRAM with the caption model.
 
-For selected detector/segmenter/OCR models, the preprocessor resolves assets in this order:
+For selected detector models, the preprocessor resolves assets in this order:
 
 1. A user-supplied model path or directory, when provided in the UI or via CLI.
 2. The expected local repo path under `~/.cache/captionhelper/vision_models`.
 3. An automatic Hugging Face download into that local repo path when auto-download is enabled and `huggingface_hub` is installed.
 
-When **Load selected preprocessing models** is enabled, CaptionHelper also asks the preprocessor to warm-load the selected detector/segmenter/OCR runtime after resolving assets. This surfaces missing Python packages or incompatible checkpoints before the Gemma caption request. Disable auto-download for fully offline/private runs, or point the override field at an already-downloaded model directory/checkpoint.
+When **Load selected preprocessing models** is enabled, CaptionHelper also asks the preprocessor to warm-load the selected detector runtime after resolving assets. This surfaces missing Python packages or incompatible checkpoints before the Gemma caption request. Disable auto-download for fully offline/private runs, or point the override field at an already-downloaded model directory/checkpoint.
 
-If the UI reports that preprocessing was skipped because packages such as `huggingface_hub`, `transformers`, `torch`, or `paddleocr` are missing, sync the current app dependencies in the same environment running CaptionHelper:
+If the UI reports that preprocessing was skipped because packages such as `huggingface_hub`, `transformers`, or `torch` are missing, sync the current app dependencies in the same environment running CaptionHelper:
 
 ```bash
 uv sync
 ```
 
-`huggingface-hub` is needed for the **Auto-download missing preprocessing models** checkbox. `transformers` and `torch` are needed to warm-load GroundingDINO/Florence-style detectors, and `paddleocr` is needed for OCR.
+`huggingface-hub` is needed for the **Auto-download missing preprocessing models** checkbox. `transformers` and `torch` are needed to warm-load and run GroundingDINO/Florence-style detectors.
 
 Example CLI:
 
@@ -323,8 +325,8 @@ python vision_preprocess.py \
   --tags /path/to/image.txt \
   --out /tmp/regions.json \
   --detector groundingdino \
-  --segmenter sam2 \
-  --ocr paddleocr \
+  --segmenter none \
+  --ocr none \
   --model-root ~/.cache/captionhelper/vision_models \
   --detector-model-path /optional/path/to/groundingdino \
   --load-models \
@@ -333,11 +335,11 @@ python vision_preprocess.py \
 
 Detector pixel boxes in `[x1, y1, x2, y2]` order are normalized to Ideogram `[y_min, x_min, y_max, x_max]` coordinates on a 1000x1000 grid, clamped to 0-1000, and rejected unless both axes have positive area. Region candidates are injected into the prompt as a `REGION_CANDIDATES` block so Gemma can prefer supplied coordinates, merge duplicates, omit bad candidates, and add missing important elements only when necessary.
 
-When region preprocessing is enabled, CaptionHelper also validates the final response as Ideogram 4 JSON and retries once with validator errors. Batch outputs get a sibling `.caption_meta.json` sidecar containing the image hash, model/backend settings, region candidates, OCR results, validation result, and provenance. These local metadata files are gitignored so private dataset metadata is not committed by default.
+When region preprocessing is enabled, CaptionHelper also validates the final response as Ideogram 4 JSON and retries once with validator errors. Batch outputs get a sibling `.caption_meta.json` sidecar containing the image hash, model/backend settings, region candidates, validation result, and provenance. These local metadata files are gitignored so private dataset metadata is not committed by default.
 
 ### llama.cpp VRAM handoff during preprocessing
 
-The preprocessor can download/resolve detector and segmenter weights, but loading those models is separate from unloading Gemma in llama.cpp. A classic `llama-server -m gemma.gguf` process does not expose a general unload/reload endpoint for its single bound model. To free VRAM while GroundingDINO/SAM2/PaddleOCR run, start a recent llama.cpp server in **router mode** and enable CaptionHelper's router handoff from the UI or environment:
+The preprocessor can download/resolve detector weights, but loading those models is separate from unloading Gemma in llama.cpp. A classic `llama-server -m gemma.gguf` process does not expose a general unload/reload endpoint for its single bound model. To free VRAM while GroundingDINO runs, start a recent llama.cpp server in **router mode** and enable CaptionHelper's router handoff from the UI or environment:
 
 ```bash
 CAPTION_LLAMA_CPP_MODEL_MANAGEMENT=router \
@@ -354,12 +356,12 @@ Relevant environment variables:
 | `CAPTION_REGION_PREPROCESS_SCRIPT` | `vision_preprocess.py` | Preprocessor script path. |
 | `CAPTION_REGION_DETECTOR` | `groundingdino` | Default detector selection. |
 | `CAPTION_REGION_SEGMENTER` | `none` | Default segmenter selection. |
-| `CAPTION_REGION_OCR` | `paddleocr` | Default OCR selection. |
+| `CAPTION_REGION_OCR` | `none` | OCR is temporarily disabled; keep this as `none`. |
 | `CAPTION_REGION_MAX_REGIONS` | `12` | Maximum retained candidates. |
 | `CAPTION_REGION_OCR_THRESHOLD` | `0.55` | Minimum OCR confidence. |
 | `CAPTION_REGION_MODEL_ROOT` | `~/.cache/captionhelper/vision_models` | Expected local repo path for selected preprocessing models. |
-| `CAPTION_REGION_AUTO_DOWNLOAD` | `true` | Whether missing selected detector/segmenter assets may be downloaded automatically. |
-| `CAPTION_REGION_LOAD_MODELS` | `true` | Warm-load selected preprocessing model runtimes before running OCR/detection. |
+| `CAPTION_REGION_AUTO_DOWNLOAD` | `true` | Whether missing selected detector assets may be downloaded automatically. |
+| `CAPTION_REGION_LOAD_MODELS` | `true` | Warm-load selected preprocessing model runtimes before running detection. |
 | `CAPTION_REGION_DETECTOR_MODEL_PATH` | empty | Optional detector checkpoint or directory override. |
 | `CAPTION_REGION_SEGMENTER_MODEL_PATH` | empty | Optional SAM2 checkpoint or directory override. |
 | `CAPTION_REGION_OCR_MODEL_PATH` | empty | Optional OCR model directory override. |

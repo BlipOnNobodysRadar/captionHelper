@@ -209,8 +209,8 @@ async function loadBackendConfig() {
       const regionSegmenterModelPath = document.getElementById('regionSegmenterModelPath');
       const regionOcrModelPath = document.getElementById('regionOcrModelPath');
       if (regionDetector) regionDetector.value = cfg.region_preprocess.detector || regionDetector.value;
-      if (regionSegmenter) regionSegmenter.value = cfg.region_preprocess.segmenter || regionSegmenter.value;
-      if (regionOcr) regionOcr.value = cfg.region_preprocess.ocr || regionOcr.value;
+      if (regionSegmenter) regionSegmenter.value = 'none';
+      if (regionOcr) regionOcr.value = 'none';
       if (regionMaxRegions) regionMaxRegions.value = cfg.region_preprocess.max_regions ?? regionMaxRegions.value;
       if (regionOcrThreshold) regionOcrThreshold.value = cfg.region_preprocess.ocr_threshold ?? regionOcrThreshold.value;
       if (regionDetectorBoxThreshold) regionDetectorBoxThreshold.value = cfg.region_preprocess.detector_box_threshold ?? regionDetectorBoxThreshold.value;
