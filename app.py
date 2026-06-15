@@ -562,10 +562,16 @@ def _run_region_preprocess(image_path:str, tags_text:str="", source_caption_path
                     stderr_text = _shorten(fh.read(), limit=4000)
             except Exception:
                 stderr_text = ""
+            progress_hint = ""
+            if last_progress:
+                progress_hint = f" Last progress: {json.dumps(last_progress, ensure_ascii=False)}"
+            error_text = stderr_text or f"region preprocessor failed with exit code {completed_returncode}.{progress_hint}"
             return {
                 "regions": [],
                 "ocr": [],
-                "error": stderr_text or "region preprocessor failed",
+                "error": error_text,
+                "returncode": completed_returncode,
+                "last_progress": last_progress,
                 "command": cmd,
             }
         with open(out_path, "r", encoding="utf-8") as fh:
@@ -794,6 +800,10 @@ def _clean_model_caption_output(text:str)->str:
     text = re.sub(r"^\s*<\|?channel\|?>thought\s*<channel\|>\s*", "", text)
     text = re.sub(r"^\s*<\|?channel\|?>[^<\n]*\s*", "", text)
     text = text.replace("<|channel|>thought", "").replace("<|channel>thought", "").replace("<channel|>", "")
+    if text.startswith("<") and "{" in text:
+        prefix, rest = text.split("{", 1)
+        if "channel" in prefix.lower() or "thought" in prefix.lower():
+            text = "{" + rest
     return text.strip()
 
 
