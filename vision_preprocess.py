@@ -316,14 +316,10 @@ def resolve_model_asset(
 
 
 def _model_load_reference(asset: dict[str, Any]) -> str | None:
-    # Runtime loading/inference must be local-only. If auto-download is enabled,
-    # resolve_model_asset downloads a snapshot into the configured model root
-    # first; after that, transformers receives that local path rather than a
-    # remote repo id.
     path = asset.get("path")
     if path and asset.get("available"):
         return str(path)
-    return None
+    return asset.get("repo_id")
 
 
 def load_selected_model_assets(model_assets: dict[str, Any], *, load_models: bool, auto_download: bool, progress_out: str = "") -> tuple[dict[str, Any], list[str]]:
@@ -712,7 +708,7 @@ def main() -> int:
         detector_asset = model_assets.get("detector") or {}
         asset_note = f" Resolved model path: {detector_asset.get('path')}." if detector_asset.get("path") else ""
         detector_loaded = (model_load_status.get("detector") or {}).get("loaded")
-        if args.detector in {"groundingdino", "groundingdino1.5"} and (detector_loaded or detector_asset.get("available")):
+        if args.detector in {"groundingdino", "groundingdino1.5"} and (detector_loaded or detector_asset.get("available") or args.auto_download):
             detected_regions, detector_diagnostics, detector_warnings = run_groundingdino_detector(
                 args.image,
                 prompts,

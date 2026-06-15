@@ -307,8 +307,6 @@ For selected detector models, the preprocessor resolves assets in this order:
 2. The expected local repo path under `~/.cache/captionhelper/vision_models`.
 3. An automatic Hugging Face download into that local repo path when auto-download is enabled and `huggingface_hub` is installed.
 
-GroundingDINO/GroundingDINO 1.5 inference is local-only. Auto-download only fetches a model snapshot into the configured local model root; the detector runtime then loads that local path instead of calling a hosted inference API. Disable auto-download and provide a model path for fully offline runs.
-
 When **Load selected preprocessing models** is enabled, CaptionHelper also asks the preprocessor to warm-load the selected detector runtime after resolving assets. This surfaces missing Python packages or incompatible checkpoints before the Gemma caption request. Disable auto-download for fully offline/private runs, or point the override field at an already-downloaded model directory/checkpoint.
 
 If the UI reports that preprocessing was skipped because packages such as `huggingface_hub`, `transformers`, or `torch` are missing, sync the current app dependencies in the same environment running CaptionHelper:

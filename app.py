@@ -1478,13 +1478,7 @@ def _process_one_target(fn:str, params:dict):
     try:
         old_text = ""
         if use_existing:
-            grounding_txt = _resolve_existing_caption_for_prompt(source_txt, out_txt)
-            if os.path.exists(grounding_txt):
-                try:
-                    with open(grounding_txt, "r", encoding="utf-8") as fh:
-                        old_text = fh.read().strip()
-                except Exception:
-                    old_text = ""
+            old_text = _read_grounding_text(in_path, out_txt, use_existing)
 
         # Prepare inputs. This happens inside the worker, so multiple files can be prepared
         # and sent to the local vision API at once.
