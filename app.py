@@ -528,6 +528,9 @@ def _detector_tags_from_context(context:dict)->str:
         context.get("character_tags", ""),
         context.get("copyright_tags", ""),
         context.get("general_tags", ""),
+        context.get("source_tags", ""),
+        # Existing captions may contain mixed prose and metadata; downstream
+        # normalization treats this as untrusted detector prompt input.
         context.get("existing_caption", ""),
     ]
     return ", ".join(str(part).strip() for part in parts if str(part or "").strip())

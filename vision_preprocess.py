@@ -132,31 +132,118 @@ def image_hash(path: str) -> str:
     return h.hexdigest()
 
 
+ACTION_OBJECT_RE = re.compile(r"^(?:holding|drawing|wielding|carrying|aiming (?:a |an )?)(.+)$", re.I)
+ACTION_ONLY_RE = re.compile(r"^(?:aiming|looking at viewer|looking at (?:camera|screen)|smile|smiling|standing|sitting|running|walking|posing|crossed arms|parted lips)$", re.I)
+TRAILING_CONNECTOR_RE = re.compile(r"\b(?:with|and|or|of|in|on|at|to|from|for|a|an|the)$", re.I)
+RATING_RE = re.compile(r"^(?:rating[:_ -]?)?(?:safe|questionable|explicit|general|sensitive)$", re.I)
+SOURCE_RE = re.compile(r"^(?:source[_\s-].+|.+\s+source)$", re.I)
+QUALITY_RE = re.compile(r"^(?:best quality|high quality|low quality|normal quality|worst quality|masterpiece|highres|absurdres|realistic|fake screenshot|game cg|transparent background)$", re.I)
+CREATOR_RE = re.compile(r"^(?:artist|style|copyright|series)[:_\s-].+|.+\((?:artist|style|copyright|series)\)$", re.I)
+PAREN_CONTENT_RE = re.compile(r"\(([^)]*)\)")
+SKIP_TAGS = {
+    "official art", "borrowed character", "gameplay mechanics", "solo", "cowboy shot",
+    "upper body", "underboob", "underboob cutout", "cleavage", "large breasts", "breasts",
+    "makeup", "eyeshadow", "ahoge", "miniskirt", "hood up", "source illustration",
+}
+PLURAL_PERSON_RE = re.compile(r"^(\d+)(girls|boys)$", re.I)
+PERSON_COUNT_MAP = {"1girl": "woman", "1boy": "man"}
+NAME_HINT_RE = re.compile(r"\b(character|cosplay|girl|boy|woman|man|armor|suit|dress|hat|hood|bow|sword|shield|gun|rifle)\b", re.I)
+
+
+def _strip_parenthetical_disambiguators(tag: str) -> str:
+    """Remove parenthetical metadata while preserving any useful generic class outside it."""
+    return PAREN_CONTENT_RE.sub("", tag).strip()
+
+
+def _map_person_count(tag: str) -> str:
+    compact = tag.replace(" ", "").lower()
+    if compact in PERSON_COUNT_MAP:
+        return PERSON_COUNT_MAP[compact]
+    match = PLURAL_PERSON_RE.match(compact)
+    if match:
+        count, gender = match.groups()
+        if count == "1":
+            return "woman" if gender.lower() == "girls" else "man"
+        return "women" if gender.lower() == "girls" else "men"
+    return tag
+
+
+def _is_probable_metadata(raw: str, tag: str) -> bool:
+    raw_l = raw.strip().lower()
+    tag_l = tag.strip().lower()
+    if not tag_l or META_TAG_RE.match(raw_l) or raw_l.startswith("score_"):
+        return True
+    if RATING_RE.match(tag_l) or SOURCE_RE.match(raw_l) or QUALITY_RE.match(tag_l):
+        return True
+    if CREATOR_RE.match(raw_l) or "artist" in raw_l or "copyright" in raw_l:
+        return True
+    if tag_l in SKIP_TAGS:
+        return True
+    if tag_l.endswith(" style") or tag_l.endswith(" artstyle"):
+        return True
+    return False
+
+
+def normalize_detector_tag(chunk: str) -> str | None:
+    """Return a clean GroundingDINO label, or None for metadata/prose/action-only chunks."""
+    original = (chunk or "").strip().strip("#")
+    if not original:
+        return None
+    raw = original.replace("_", " ")
+    tag = _strip_parenthetical_disambiguators(raw)
+    tag = re.sub(r"\s+", " ", tag).strip(" .;:-").lower()
+    tag = _map_person_count(tag)
+    if _is_probable_metadata(original, tag) or _is_probable_metadata(raw, tag):
+        return None
+    if "(character)" in raw.lower() and not NAME_HINT_RE.search(tag):
+        return None
+
+    action_match = ACTION_OBJECT_RE.match(tag)
+    if action_match:
+        tag = action_match.group(1).strip()
+        tag = re.sub(r"^(?:a|an|the)\s+", "", tag)
+        tag = tag.replace("bow weapon", "bow")
+    if ACTION_ONLY_RE.match(tag):
+        return None
+
+    words = tag.split()
+    if not words:
+        return None
+    if TRAILING_CONNECTOR_RE.search(tag):
+        return None
+    if len(words) > 4:
+        return None
+    # Skip proper-name-only character/copyright tags, but keep names with generic visual classes.
+    raw_without_parens = _strip_parenthetical_disambiguators(raw).strip()
+    if len(words) <= 2 and raw_without_parens.istitle() and not NAME_HINT_RE.search(tag):
+        return None
+    if len(words) == 1 and tag not in FALLBACK_VOCABULARY and raw_without_parens[:1].isupper() and not NAME_HINT_RE.search(tag):
+        return None
+    if re.search(r"\b(?:league of legends|diablo|kurzgesagt|ashe|caitlyn|link)\b", tag) and not NAME_HINT_RE.search(tag):
+        return None
+    return tag
+
+
 def split_tags(text: str) -> list[str]:
-    chunks = re.split(r"[,\n]", text or "")
-    tags = []
-    for chunk in chunks:
-        tag = chunk.strip().strip("#")
-        if not tag or META_TAG_RE.match(tag):
-            continue
-        tag = tag.replace("_", " ")
-        tag = re.sub(r"\([^)]*\)", "", tag).strip()
-        if LOW_VALUE_DETECTOR_TAG_RE.match(tag):
-            continue
-        if len(tag) <= 40:
+    tags: list[str] = []
+    seen: set[str] = set()
+    for chunk in re.split(r"[,\n]", text or ""):
+        tag = normalize_detector_tag(chunk)
+        if tag and tag not in seen:
             tags.append(tag)
+            seen.add(tag)
     return tags
 
 
-def build_detector_prompts(tags_text: str, max_prompts: int = 48) -> list[str]:
-    prompts = []
-    for tag in split_tags(tags_text):
-        # Keep likely visible nouns; skip artist/copyright-ish names by relying on length and meta filtering.
-        if tag.lower() not in {p.lower() for p in prompts}:
-            prompts.append(tag)
+def build_detector_prompts(tags_text: str, max_prompts: int = 32) -> list[str]:
+    prompts = split_tags(tags_text)
+    seen = {p.lower() for p in prompts}
     for word in FALLBACK_VOCABULARY:
-        if word.lower() not in {p.lower() for p in prompts}:
+        if len(prompts) >= max_prompts:
+            break
+        if word.lower() not in seen:
             prompts.append(word)
+            seen.add(word.lower())
     return prompts[:max_prompts]
 
 
@@ -492,7 +579,7 @@ def run_groundingdino_detector(
         else:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         model = model.to(device)
-        labels = [p.strip().lower() for p in prompts if p.strip()][:48]
+        labels = [p.strip().lower() for p in prompts if p.strip()][:32]
         text_prompt = ". ".join(labels)
         if text_prompt and not text_prompt.endswith("."):
             text_prompt += "."
@@ -750,6 +837,8 @@ def main() -> int:
         "device": args.device,
         "model_assets": model_assets,
         "model_load_status": model_load_status,
+        "raw_detector_text": tags_text,
+        "normalized_detector_prompts": prompts,
         "detector_prompts": prompts,
         "detector_diagnostics": detector_diagnostics,
         "regions": [c.to_json() for c in kept if c.type_hint == "obj"],
