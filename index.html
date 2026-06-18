@@ -2,22 +2,28 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>llama.cpp/OpenAI-compatible Video/Image Captioner</title>
+  <title>Caption Helper</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <div class="layout">
     <main class="chat">
-      <h2>Multiturn chat outputs, separated between user and LLM</h2>
-      <p id="backendInfo" class="backend-info">Backend: loading…</p>
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Local vision caption workspace</p>
+          <h1>Caption Helper</h1>
+          <p class="hero-copy">Attach an image or clip, tune the prompt, and generate clean dataset captions without leaving the browser.</p>
+        </div>
+        <p id="backendInfo" class="backend-info">Backend: loading…</p>
+      </header>
 
       <div id="chatLog" class="chatlog"></div>
 
       <div class="composer">
         <label class="filedrop">
           <input type="file" id="clipInput" accept="video/*">
-          <span>message/drop in image or clip attachment</span>
+          <strong>Drop a file or click to browse</strong><small>Images and videos are supported based on mode.</small>
         </label>
         <button id="sendBtn">Send & Caption</button>
       </div>
@@ -25,7 +31,7 @@
 
     <aside class="side">
       <section class="card">
-        <h3>caption preset + prompts</h3>
+        <h3>Caption preset & prompts</h3>
         <div class="row">
           <label>Preset:</label>
           <select id="captionPreset"></select>
@@ -48,7 +54,7 @@
       </section>
 
       <section class="card">
-        <h3>settings</h3>
+        <h3>Settings</h3>
 
         <div class="row">
           <label>Model:</label>
@@ -226,7 +232,7 @@
       </section>
 
       <section class="card">
-        <h3>Batch Process Args</h3>
+        <h3>Batch processing</h3>
         <div class="row">
           <label>Target folder:</label>
           <input id="targetFolder" placeholder="/path/to/clips_or_images">
