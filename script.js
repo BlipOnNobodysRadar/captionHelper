@@ -336,6 +336,25 @@ function setAttachmentFile(file) {
   renderAttachmentPreview(file);
 }
 
+function attachFileToInput(file) {
+  if (!file || !clipInput) return;
+  const transfer = new DataTransfer();
+  transfer.items.add(file);
+  clipInput.files = transfer.files;
+  setAttachmentFile(file);
+}
+
+function firstUsableFile(fileList) {
+  return Array.from(fileList || []).find(file => selectedFileLooksLikeImage(file) || selectedFileLooksLikeVideo(file)) || null;
+}
+
+function autoSizeChatInput() {
+  if (!chatMessage) return;
+  chatMessage.style.height = 'auto';
+  const maxHeight = Math.round(window.innerHeight * 0.32);
+  chatMessage.style.height = `${Math.min(chatMessage.scrollHeight, maxHeight)}px`;
+}
+
 function renderAttachmentPreview(file) {
   if (!attachmentPreview) return;
   if (currentAttachmentUrl) {
@@ -385,13 +404,42 @@ if (fileDrop) {
     });
   });
   fileDrop.addEventListener('drop', (event) => {
-    const file = event.dataTransfer?.files?.[0];
+    const file = firstUsableFile(event.dataTransfer?.files);
     if (!file) return;
-    const transfer = new DataTransfer();
-    transfer.items.add(file);
-    clipInput.files = transfer.files;
-    setAttachmentFile(file);
+    attachFileToInput(file);
   });
+}
+
+if (chatMessage) {
+  chatMessage.addEventListener('input', autoSizeChatInput);
+  chatMessage.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      if (!sendBtn.disabled) sendBtn.click();
+    }
+  });
+  ['dragenter', 'dragover'].forEach(eventName => {
+    chatMessage.addEventListener(eventName, (event) => {
+      if (!Array.from(event.dataTransfer?.types || []).includes('Files')) return;
+      event.preventDefault();
+      chatMessage.classList.add('drag-over');
+    });
+  });
+  ['dragleave', 'drop'].forEach(eventName => {
+    chatMessage.addEventListener(eventName, (event) => {
+      chatMessage.classList.remove('drag-over');
+      if (eventName === 'drop') event.preventDefault();
+    });
+  });
+  chatMessage.addEventListener('drop', (event) => {
+    const file = firstUsableFile(event.dataTransfer?.files);
+    if (file) attachFileToInput(file);
+  });
+  chatMessage.addEventListener('paste', (event) => {
+    const file = firstUsableFile(event.clipboardData?.files);
+    if (file) attachFileToInput(file);
+  });
+  autoSizeChatInput();
 }
 
 function buildChatFormData(file) {
@@ -454,7 +502,10 @@ function clearAttachment() {
 function clearChat({ clearDraft = false, clearFile = false } = {}) {
   chatHistory = [];
   chatLog.innerHTML = '';
-  if (clearDraft && chatMessage) chatMessage.value = '';
+  if (clearDraft && chatMessage) {
+    chatMessage.value = '';
+    autoSizeChatInput();
+  }
   if (clearFile) clearAttachment();
 }
 
@@ -585,10 +636,14 @@ sendBtn.addEventListener('click', async () => {
   try {
     const caption = await streamChatCaption(file);
     if (caption) chatHistory.push({ role: 'assistant', content: caption });
-    if (chatMessage) chatMessage.value = '';
+    if (chatMessage) {
+      chatMessage.value = '';
+      autoSizeChatInput();
+    }
   } catch (e) {
     addMsg('assistant', 'Error: ' + (e.message || e), 'error');
   } finally {
+    if (file) clearAttachment();
     sendBtn.disabled = false;
   }
 });
