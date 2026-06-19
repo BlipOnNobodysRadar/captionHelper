@@ -21,10 +21,12 @@
       <div id="chatLog" class="chatlog"></div>
 
       <div class="composer">
-        <label class="filedrop">
-          <input type="file" id="clipInput" accept="video/*">
-          <strong>Drop a file or click to browse</strong><small>Images and videos are supported based on mode.</small>
+        <label class="filedrop" id="fileDrop">
+          <input type="file" id="clipInput" accept="video/*,image/*">
+          <span class="filedrop-copy"><strong>Drop a file or click to browse</strong><small>Images and videos are supported based on mode.</small></span>
         </label>
+        <div id="attachmentPreview" class="attachment-preview" hidden></div>
+        <textarea id="chatMessage" class="chat-input" rows="3" placeholder="Optional follow-up message for multi-turn chat…"></textarea>
         <button id="sendBtn">Send & Caption</button>
       </div>
     </main>
@@ -58,7 +60,7 @@
 
         <div class="row">
           <label>Model:</label>
-          <input id="modelName" placeholder="qwen2.5-vl-32b-instruct">
+          <input id="modelName" placeholder="gemma4-12b-vision">
         </div>
 
         <div class="row">
