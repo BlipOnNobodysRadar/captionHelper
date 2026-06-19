@@ -380,7 +380,7 @@ CAPTION_PRESETS = [
         "system_prompt": DEFAULT_VIDEO_SYSTEM_PROMPT,
         "user_template": VIDEO_USER_TEMPLATE,
         "prefill": "",
-        "max_output_tokens": 512,
+        "max_output_tokens": 0,
     },
     {
         "id": "video_grounded",
@@ -390,7 +390,7 @@ CAPTION_PRESETS = [
         "system_prompt": DEFAULT_VIDEO_SYSTEM_PROMPT,
         "user_template": VIDEO_GROUNDED_USER_TEMPLATE,
         "prefill": "",
-        "max_output_tokens": 512,
+        "max_output_tokens": 0,
     },
     {
         "id": "image_basic",
@@ -400,7 +400,7 @@ CAPTION_PRESETS = [
         "system_prompt": DEFAULT_IMAGE_SYSTEM_PROMPT,
         "user_template": IMAGE_USER_TEMPLATE,
         "prefill": "",
-        "max_output_tokens": 512,
+        "max_output_tokens": 0,
     },
     {
         "id": "image_detailed",
@@ -410,7 +410,7 @@ CAPTION_PRESETS = [
         "system_prompt": DETAILED_IMAGE_SYSTEM_PROMPT,
         "user_template": IMAGE_USER_TEMPLATE,
         "prefill": "",
-        "max_output_tokens": 768,
+        "max_output_tokens": 0,
     },
     {
         "id": "image_grounded_tags",
@@ -420,7 +420,7 @@ CAPTION_PRESETS = [
         "system_prompt": TAG_TO_NATURAL_IMAGE_SYSTEM_PROMPT,
         "user_template": IMAGE_GROUNDED_USER_TEMPLATE,
         "prefill": "",
-        "max_output_tokens": 768,
+        "max_output_tokens": 0,
     },
     {
         "id": "ideogram4_json",
@@ -430,6 +430,6 @@ CAPTION_PRESETS = [
         "system_prompt": IDEOGRAM4_JSON_SYSTEM_PROMPT,
         "user_template": IDEOGRAM4_JSON_USER_TEMPLATE,
         "prefill": "",
-        "max_output_tokens": 2048,
+        "max_output_tokens": 0,
     },
 ]

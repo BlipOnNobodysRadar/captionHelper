@@ -442,11 +442,11 @@ if (chatMessage) {
   autoSizeChatInput();
 }
 
-function buildChatFormData(file) {
+function buildChatFormData(file, messageOverride = null, historyOverride = null) {
   const fd = new FormData();
   if (file) fd.append('file', file);
-  fd.append('chat_message', chatMessage ? chatMessage.value : '');
-  fd.append('chat_history', JSON.stringify(chatHistory.slice(-12)));
+  fd.append('chat_message', messageOverride !== null ? messageOverride : (chatMessage ? chatMessage.value : ''));
+  fd.append('chat_history', JSON.stringify(historyOverride || chatHistory.slice(-12)));
   fd.append('system_prompt', document.getElementById('systemPrompt').value);
   fd.append('num_frames', document.getElementById('numFrames').value);
   fd.append('sampling_type', document.getElementById('samplingType').value);
@@ -516,7 +516,7 @@ if (newChatBtn) {
   newChatBtn.addEventListener('click', () => clearChat({ clearDraft: true, clearFile: true }));
 }
 
-function createStreamingAssistantMsg() {
+function createStreamingAssistantMsg(turn = null) {
   const div = document.createElement('div');
   div.className = 'msg assistant streaming';
 
@@ -535,15 +535,24 @@ function createStreamingAssistantMsg() {
   content.className = 'assistant-content';
   content.textContent = 'Waiting for response';
 
+  const retryButton = document.createElement('button');
+  retryButton.type = 'button';
+  retryButton.className = 'retry-turn';
+  retryButton.textContent = 'Retry turn';
+  retryButton.hidden = true;
+  retryButton.addEventListener('click', () => {
+    if (turn) retryTurn(turn);
+  });
+
   thinkingButton.addEventListener('click', () => {
     thinkingPanel.hidden = !thinkingPanel.hidden;
     thinkingButton.setAttribute('aria-expanded', String(!thinkingPanel.hidden));
   });
 
-  div.append(thinkingButton, thinkingPanel, content);
+  div.append(thinkingButton, thinkingPanel, content, retryButton);
   chatLog.appendChild(div);
   chatLog.scrollTop = chatLog.scrollHeight;
-  return { div, thinkingButton, thinkingPanel, content };
+  return { div, thinkingButton, thinkingPanel, content, retryButton };
 }
 
 function parseSseEvents(buffer, onEvent) {
@@ -566,8 +575,8 @@ function parseSseEvents(buffer, onEvent) {
   return remainder;
 }
 
-async function streamChatCaption(file) {
-  const res = await fetch('/api/chat-caption-stream', { method: 'POST', body: buildChatFormData(file) });
+async function streamChatCaption(turn) {
+  const res = await fetch('/api/chat-caption-stream', { method: 'POST', body: buildChatFormData(turn.file, turn.message, turn.historyBefore) });
   if (!res.ok || !res.body) {
     let message = `HTTP ${res.status}`;
     try {
@@ -583,7 +592,7 @@ async function streamChatCaption(file) {
   let assistantText = '';
   let thinkingText = '';
   let notices = '';
-  const assistantMsg = createStreamingAssistantMsg();
+  const assistantMsg = createStreamingAssistantMsg(turn);
 
   function renderAssistant() {
     assistantMsg.thinkingButton.classList.toggle('thinking', !assistantText);
@@ -614,14 +623,34 @@ async function streamChatCaption(file) {
         assistantMsg.thinkingButton.classList.remove('thinking');
         assistantMsg.div.classList.add('error');
         assistantMsg.content.textContent = 'Error: ' + (payload.error || 'Unknown error');
+        assistantMsg.retryButton.hidden = false;
       } else if (event === 'done' && payload.caption) {
         assistantText = payload.caption;
         renderAssistant();
+        assistantMsg.retryButton.hidden = false;
       }
     });
   }
   assistantMsg.thinkingButton.classList.remove('thinking');
+  assistantMsg.retryButton.hidden = false;
   return assistantText.trim();
+}
+
+async function retryTurn(turn) {
+  if (sendBtn.disabled) return;
+  sendBtn.disabled = true;
+  try {
+    const caption = await streamChatCaption(turn);
+    if (caption && !turn.recorded) {
+      chatHistory.push({ role: 'user', content: turn.userText });
+      chatHistory.push({ role: 'assistant', content: caption });
+      turn.recorded = true;
+    }
+  } catch (e) {
+    addMsg('assistant', 'Error: ' + (e.message || e), 'error');
+  } finally {
+    sendBtn.disabled = false;
+  }
 }
 
 sendBtn.addEventListener('click', async () => {
@@ -630,12 +659,16 @@ sendBtn.addEventListener('click', async () => {
   if (!file && !message) { addMsg('assistant', 'Attach a file or type a message first.'); return; }
 
   const userText = [file ? `Attached: ${file.name}` : '', message].filter(Boolean).join('\n\n');
+  const turn = { file, message, userText, historyBefore: chatHistory.slice(-12), recorded: false };
   addMsg('user', userText);
-  chatHistory.push({ role: 'user', content: userText });
   sendBtn.disabled = true;
   try {
-    const caption = await streamChatCaption(file);
-    if (caption) chatHistory.push({ role: 'assistant', content: caption });
+    const caption = await streamChatCaption(turn);
+    if (caption) {
+      chatHistory.push({ role: 'user', content: userText });
+      chatHistory.push({ role: 'assistant', content: caption });
+      turn.recorded = true;
+    }
     if (chatMessage) {
       chatMessage.value = '';
       autoSizeChatInput();

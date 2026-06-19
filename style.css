@@ -122,7 +122,8 @@ h1 { margin: 0; font-size: clamp(2rem, 5vw, 4.2rem); line-height: 0.95; letter-s
   justify-content: flex-end;
 }
 .chat-actions button,
-.thinking-toggle {
+.thinking-toggle,
+.retry-turn {
   background: rgba(23, 34, 60, 0.95);
   border: 1px solid var(--border);
   box-shadow: none;
@@ -240,7 +241,8 @@ h1 { margin: 0; font-size: clamp(2rem, 5vw, 4.2rem); line-height: 0.95; letter-s
 .assistant-content {
   white-space: pre-wrap;
 }
-.thinking-toggle {
+.thinking-toggle,
+.retry-turn {
   justify-self: start;
   font-size: 0.78rem;
   padding: 0.42rem 0.68rem;
