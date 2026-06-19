@@ -1091,13 +1091,21 @@ def _stream_chat_completion(messages:list, model:str, max_output_tokens:int=DEFA
                 continue
             for choice in data.get("choices") or []:
                 delta = choice.get("delta") or {}
+                thinking = (
+                    delta.get("reasoning_content")
+                    or delta.get("reasoning")
+                    or delta.get("thinking")
+                    or delta.get("thought")
+                )
+                if thinking:
+                    yield "thinking", thinking
                 token = delta.get("content")
                 if token:
-                    yield token
+                    yield "token", token
                 message = choice.get("message") or {}
                 content = message.get("content")
                 if content:
-                    yield content
+                    yield "token", content
 
 
 def _safe_chat_history(raw:str)->list:
@@ -1393,9 +1401,12 @@ def chat_caption_stream():
             messages.append({"role": "user", "content": _build_user_content(prepared["user_prompt"], prepared["imgs"])})
             if prepared["prefill"].strip():
                 messages.append({"role": "assistant", "content": prepared["prefill"].strip()})
-            for token in _stream_chat_completion(messages, prepared["model"], prepared["max_output_tokens"]):
-                final_text.append(token)
-                yield _json_sse("token", {"token": token})
+            for event_type, token in _stream_chat_completion(messages, prepared["model"], prepared["max_output_tokens"]):
+                if event_type == "thinking":
+                    yield _json_sse("thinking", {"token": token})
+                else:
+                    final_text.append(token)
+                    yield _json_sse("token", {"token": token})
             caption = _clean_model_caption_output("".join(final_text))
             if not caption:
                 yield _json_sse("error", {"error": "Backend returned an empty caption."})

@@ -4,6 +4,8 @@ const clipInput = document.getElementById('clipInput');
 const fileDrop = document.getElementById('fileDrop');
 const attachmentPreview = document.getElementById('attachmentPreview');
 const chatMessage = document.getElementById('chatMessage');
+const newChatBtn = document.getElementById('newChatBtn');
+const clearChatBtn = document.getElementById('clearChatBtn');
 let currentAttachmentUrl = '';
 let chatHistory = [];
 
@@ -437,6 +439,62 @@ function addMsg(who, text, extraClass = '') {
   return div;
 }
 
+function clearAttachment() {
+  if (currentAttachmentUrl) {
+    URL.revokeObjectURL(currentAttachmentUrl);
+    currentAttachmentUrl = '';
+  }
+  if (clipInput) clipInput.value = '';
+  if (attachmentPreview) {
+    attachmentPreview.hidden = true;
+    attachmentPreview.innerHTML = '';
+  }
+}
+
+function clearChat({ clearDraft = false, clearFile = false } = {}) {
+  chatHistory = [];
+  chatLog.innerHTML = '';
+  if (clearDraft && chatMessage) chatMessage.value = '';
+  if (clearFile) clearAttachment();
+}
+
+if (clearChatBtn) {
+  clearChatBtn.addEventListener('click', () => clearChat());
+}
+if (newChatBtn) {
+  newChatBtn.addEventListener('click', () => clearChat({ clearDraft: true, clearFile: true }));
+}
+
+function createStreamingAssistantMsg() {
+  const div = document.createElement('div');
+  div.className = 'msg assistant streaming';
+
+  const thinkingButton = document.createElement('button');
+  thinkingButton.type = 'button';
+  thinkingButton.className = 'thinking-toggle thinking';
+  thinkingButton.textContent = 'Thinking';
+  thinkingButton.setAttribute('aria-expanded', 'false');
+
+  const thinkingPanel = document.createElement('pre');
+  thinkingPanel.className = 'thinking-panel';
+  thinkingPanel.hidden = true;
+  thinkingPanel.textContent = 'No thinking tokens received yet.';
+
+  const content = document.createElement('div');
+  content.className = 'assistant-content';
+  content.textContent = 'Waiting for response';
+
+  thinkingButton.addEventListener('click', () => {
+    thinkingPanel.hidden = !thinkingPanel.hidden;
+    thinkingButton.setAttribute('aria-expanded', String(!thinkingPanel.hidden));
+  });
+
+  div.append(thinkingButton, thinkingPanel, content);
+  chatLog.appendChild(div);
+  chatLog.scrollTop = chatLog.scrollHeight;
+  return { div, thinkingButton, thinkingPanel, content };
+}
+
 function parseSseEvents(buffer, onEvent) {
   const blocks = buffer.split('\n\n');
   const remainder = blocks.pop() || '';
@@ -472,12 +530,15 @@ async function streamChatCaption(file) {
   const decoder = new TextDecoder();
   let buffer = '';
   let assistantText = '';
+  let thinkingText = '';
   let notices = '';
-  const assistantMsg = addMsg('assistant', 'Thinking', 'thinking');
+  const assistantMsg = createStreamingAssistantMsg();
 
   function renderAssistant() {
-    assistantMsg.classList.toggle('thinking', !assistantText);
-    assistantMsg.textContent = (notices ? notices + '\n\n' : '') + (assistantText || 'Thinking');
+    assistantMsg.thinkingButton.classList.toggle('thinking', !assistantText);
+    assistantMsg.thinkingButton.textContent = thinkingText ? 'Thinking tokens' : 'Thinking';
+    assistantMsg.thinkingPanel.textContent = thinkingText || 'No thinking tokens received yet.';
+    assistantMsg.content.textContent = (notices ? notices + '\n\n' : '') + (assistantText || 'Waiting for response');
     chatLog.scrollTop = chatLog.scrollHeight;
   }
 
@@ -492,20 +553,23 @@ async function streamChatCaption(file) {
         const modelNotice = formatModelManagementNotice(payload.model_management);
         notices = [preprocessNotice, modelNotice, framesInfo].filter(Boolean).join('\n');
         renderAssistant();
+      } else if (event === 'thinking') {
+        thinkingText += payload.token || '';
+        renderAssistant();
       } else if (event === 'token') {
         assistantText += payload.token || '';
         renderAssistant();
       } else if (event === 'error') {
-        assistantMsg.classList.remove('thinking');
-        assistantMsg.classList.add('error');
-        assistantMsg.textContent = 'Error: ' + (payload.error || 'Unknown error');
+        assistantMsg.thinkingButton.classList.remove('thinking');
+        assistantMsg.div.classList.add('error');
+        assistantMsg.content.textContent = 'Error: ' + (payload.error || 'Unknown error');
       } else if (event === 'done' && payload.caption) {
         assistantText = payload.caption;
         renderAssistant();
       }
     });
   }
-  assistantMsg.classList.remove('thinking');
+  assistantMsg.thinkingButton.classList.remove('thinking');
   return assistantText.trim();
 }
 

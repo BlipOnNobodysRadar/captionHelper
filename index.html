@@ -15,7 +15,13 @@
           <h1>Caption Helper</h1>
           <p class="hero-copy">Attach an image or clip, tune the prompt, and generate clean dataset captions without leaving the browser.</p>
         </div>
-        <p id="backendInfo" class="backend-info">Backend: loading…</p>
+        <div class="hero-status">
+          <p id="backendInfo" class="backend-info">Backend: loading…</p>
+          <div class="chat-actions" aria-label="Chat actions">
+            <button type="button" id="newChatBtn">New chat</button>
+            <button type="button" id="clearChatBtn">Clear chat</button>
+          </div>
+        </div>
       </header>
 
       <div id="chatLog" class="chatlog"></div>
