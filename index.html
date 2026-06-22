@@ -59,6 +59,31 @@
           <textarea id="userTemplate" rows="7" placeholder="Use [image] where image/video frames should be inserted. Available placeholders: {existing_caption}, {source_tags}, {character_tags}, {copyright_tags}, {artist_tags}, {general_tags}, {rating_tags}, {quality_tags}, {media_kind}, {input_count}"></textarea>
           <small style="color:#8a90a6">Lines with only empty placeholders are omitted, so metadata blocks can be optional.</small>
         </div>
+        <details class="metadata-details few-shot-details">
+          <summary>Few-shot image + caption examples</summary>
+          <small>Optional. Each sample image is sent before the target, labeled as an example, followed by its matching caption as an assistant response. The target image/clip is labeled separately after the examples.</small>
+          <div class="few-shot-grid">
+            <div class="few-shot-example">
+              <label>Example 1 image:</label>
+              <input id="fewShotImage1" type="file" accept="image/*">
+              <label>Example 1 caption:</label>
+              <textarea id="fewShotCaption1" rows="3" placeholder="Matching caption / Ideogram JSON for example 1"></textarea>
+            </div>
+            <div class="few-shot-example">
+              <label>Example 2 image:</label>
+              <input id="fewShotImage2" type="file" accept="image/*">
+              <label>Example 2 caption:</label>
+              <textarea id="fewShotCaption2" rows="3" placeholder="Matching caption / Ideogram JSON for example 2"></textarea>
+            </div>
+            <div class="few-shot-example">
+              <label>Example 3 image:</label>
+              <input id="fewShotImage3" type="file" accept="image/*">
+              <label>Example 3 caption:</label>
+              <textarea id="fewShotCaption3" rows="3" placeholder="Matching caption / Ideogram JSON for example 3"></textarea>
+            </div>
+          </div>
+        </details>
+
       </section>
 
       <section class="card">

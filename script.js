@@ -120,8 +120,9 @@ if (captionPresetSelect) {
   captionPresetSelect.addEventListener('change', () => applyPreset(getSelectedPreset()));
 }
 
-function collectPresetPayload(name, id = '') {
-  const batchSettings = getBatchBody();
+async function collectPresetPayload(name, id = '') {
+  const batchSettings = await getBatchBody();
+  delete batchSettings.few_shot_examples;
   return {
     id,
     name,
@@ -144,7 +145,7 @@ async function saveCurrentPreset() {
   const name = window.prompt('Name for this user preset:', defaultName);
   if (!name || !name.trim()) return;
   const updateExisting = selected && selected.source === 'user';
-  const payload = collectPresetPayload(name.trim(), updateExisting ? selected.id : '');
+  const payload = await collectPresetPayload(name.trim(), updateExisting ? selected.id : '');
 
   try {
     setPresetStatus('Saving preset…');
@@ -211,6 +212,37 @@ function readMetadataFields() {
     rating_tags: document.getElementById('ratingTags').value,
     quality_tags: document.getElementById('qualityTags').value
   };
+}
+
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener('load', () => resolve(reader.result));
+    reader.addEventListener('error', () => reject(reader.error || new Error('Unable to read file')));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function collectFewShotExamples() {
+  const examples = [];
+  for (let i = 1; i <= 3; i++) {
+    const file = document.getElementById(`fewShotImage${i}`)?.files?.[0];
+    const caption = document.getElementById(`fewShotCaption${i}`)?.value?.trim() || '';
+    if (!file && !caption) continue;
+    if (!file || !caption) {
+      throw new Error(`Few-shot example ${i} needs both an image and a matching caption.`);
+    }
+    if (!selectedFileLooksLikeImage(file)) {
+      throw new Error(`Few-shot example ${i} must be an image file.`);
+    }
+    examples.push({
+      name: file.name,
+      caption,
+      image_data_url: await fileToDataUrl(file)
+    });
+  }
+  return examples;
 }
 
 async function loadBackendConfig() {
@@ -442,11 +474,12 @@ if (chatMessage) {
   autoSizeChatInput();
 }
 
-function buildChatFormData(file, messageOverride = null, historyOverride = null) {
+async function buildChatFormData(file, messageOverride = null, historyOverride = null) {
   const fd = new FormData();
   if (file) fd.append('file', file);
   fd.append('chat_message', messageOverride !== null ? messageOverride : (chatMessage ? chatMessage.value : ''));
   fd.append('chat_history', JSON.stringify(historyOverride || chatHistory.slice(-12)));
+  fd.append('few_shot_examples', JSON.stringify(await collectFewShotExamples()));
   fd.append('system_prompt', document.getElementById('systemPrompt').value);
   fd.append('num_frames', document.getElementById('numFrames').value);
   fd.append('sampling_type', document.getElementById('samplingType').value);
@@ -576,7 +609,7 @@ function parseSseEvents(buffer, onEvent) {
 }
 
 async function streamChatCaption(turn) {
-  const res = await fetch('/api/chat-caption-stream', { method: 'POST', body: buildChatFormData(turn.file, turn.message, turn.historyBefore) });
+  const res = await fetch('/api/chat-caption-stream', { method: 'POST', body: await buildChatFormData(turn.file, turn.message, turn.historyBefore) });
   if (!res.ok || !res.body) {
     let message = `HTTP ${res.status}`;
     try {
@@ -739,7 +772,7 @@ function renderActiveFiles(active) {
   }).join('\n');
 }
 
-function getBatchBody() {
+async function getBatchBody() {
   return {
     target_folder: document.getElementById('targetFolder').value,
     system_prompt: document.getElementById('systemPrompt').value,
@@ -776,6 +809,7 @@ function getBatchBody() {
     output_subdir_name: document.getElementById('outputSubdirName').value,
     use_existing_caption: document.getElementById('useExistingCaption').checked,
     image_mode: imageModeToggle && imageModeToggle.checked,
+    few_shot_examples: await collectFewShotExamples(),
     ...readMetadataFields()
   };
 }
@@ -885,7 +919,7 @@ startBtn.addEventListener('click', async () => {
   if (resumeBtn) resumeBtn.disabled = true;
 
   try {
-    const body = getBatchBody();
+    const body = await getBatchBody();
     const res = await fetch('/api/batch-start', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},

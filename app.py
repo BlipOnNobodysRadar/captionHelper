@@ -473,6 +473,42 @@ def _build_user_content(user_prompt:str, images_data_urls):
     return parts
 
 
+def _normalize_few_shot_examples(raw)->list[dict]:
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw or "[]")
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(raw, list):
+        return []
+    examples = []
+    for idx, item in enumerate(raw[:6], start=1):
+        if not isinstance(item, dict):
+            continue
+        caption = str(item.get("caption") or "").strip()
+        image_url = str(item.get("image_data_url") or item.get("image_url") or "").strip()
+        name = str(item.get("name") or f"example {idx}").strip()
+        if not caption or not image_url.startswith("data:image/"):
+            continue
+        examples.append({"caption": caption, "image_data_url": image_url, "name": name[:120]})
+    return examples
+
+
+def _few_shot_messages(examples:list[dict])->list[dict]:
+    messages = []
+    for idx, example in enumerate(examples or [], start=1):
+        name = example.get("name") or f"example {idx}"
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": f"Few-shot example {idx}. This is a SAMPLE image named {name}. Study the image and its matching caption format; do not caption the final target yet."},
+                {"type": "image_url", "image_url": {"url": example["image_data_url"]}},
+            ],
+        })
+        messages.append({"role": "assistant", "content": example.get("caption", "")})
+    return messages
+
+
 def _sha256_file(path:str)->str:
     h = hashlib.sha256()
     with open(path, "rb") as fh:
@@ -890,17 +926,19 @@ def _is_retryable_api_status(status_code:int)->bool:
     return status_code in {400, 408, 409, 425, 429, 500, 502, 503, 504}
 
 
-def call_vision_api(images_data_urls, system_prompt:str, model:str, prefill:str="", media_kind:str="clip", max_output_tokens:int=DEFAULT_MAX_OUTPUT_TOKENS, user_prompt:str=""):
+def call_vision_api(images_data_urls, system_prompt:str, model:str, prefill:str="", media_kind:str="clip", max_output_tokens:int=DEFAULT_MAX_OUTPUT_TOKENS, user_prompt:str="", few_shot_examples=None):
     if not user_prompt:
         if media_kind == "image":
             user_prompt = "You are given a single still image. Write a descriptive caption.\n\n[image]"
         else:
             user_prompt = "You are given a few frames sampled from a short video clip. Write a descriptive caption for the clip as a whole.\n\n[image]"
 
-    messages = [
-        {"role":"system","content": (system_prompt or "").strip()},
-        {"role":"user","content": _build_user_content(user_prompt, images_data_urls)}
-    ]
+    target_prompt = (user_prompt or "").strip()
+    if few_shot_examples:
+        target_prompt = "The few-shot SAMPLE image/caption pairs above are examples only. Now caption the TARGET visual input below.\n\n" + target_prompt
+    messages = [{"role":"system","content": (system_prompt or "").strip()}]
+    messages.extend(_few_shot_messages(few_shot_examples or []))
+    messages.append({"role":"user","content": _build_user_content(target_prompt, images_data_urls)})
 
     payload = {
         "model": model or DEFAULT_MODEL,
@@ -1030,8 +1068,8 @@ def validate_ideogram4_json_caption(caption:str)->dict:
     return {"valid": not errors, "errors": errors, "data": data}
 
 
-def _caption_with_validation(imgs, system_prompt, model, prefill, media_kind, max_output_tokens, user_prompt, validate_json=False):
-    caption = call_vision_api(imgs, system_prompt, model, prefill=prefill, media_kind=media_kind, max_output_tokens=max_output_tokens, user_prompt=user_prompt)
+def _caption_with_validation(imgs, system_prompt, model, prefill, media_kind, max_output_tokens, user_prompt, validate_json=False, few_shot_examples=None):
+    caption = call_vision_api(imgs, system_prompt, model, prefill=prefill, media_kind=media_kind, max_output_tokens=max_output_tokens, user_prompt=user_prompt, few_shot_examples=few_shot_examples)
     validation = validate_ideogram4_json_caption(caption) if validate_json else {"valid": True, "errors": []}
     retried = False
     if validate_json and not validation["valid"]:
@@ -1042,7 +1080,7 @@ def _caption_with_validation(imgs, system_prompt, model, prefill, media_kind, ma
             + "\n\nReturn corrected Ideogram 4 JSON only. Do not include commentary."
         )
         retried = True
-        caption = call_vision_api(imgs, system_prompt, model, prefill=prefill, media_kind=media_kind, max_output_tokens=max_output_tokens, user_prompt=retry_prompt)
+        caption = call_vision_api(imgs, system_prompt, model, prefill=prefill, media_kind=media_kind, max_output_tokens=max_output_tokens, user_prompt=retry_prompt, few_shot_examples=few_shot_examples)
         validation = validate_ideogram4_json_caption(caption)
     return caption, {
         "validation": validation,
@@ -1159,6 +1197,7 @@ def _prepare_chat_request(form, files):
     existing_caption_text = form.get("existing_caption", "")
     enable_region_preprocess = form.get("enable_region_preprocess", "false").lower() in ("1", "true", "yes", "on")
     validate_ideogram_json = form.get("validate_ideogram_json", "false").lower() in ("1", "true", "yes", "on")
+    few_shot_examples = _normalize_few_shot_examples(form.get("few_shot_examples", "[]"))
     media_kind = "image" if image_mode else "clip"
 
     tmpdir = "tmp_uploads"
@@ -1242,6 +1281,7 @@ def _prepare_chat_request(form, files):
             "region_payload": region_payload,
             "model_management": model_management,
             "history": _safe_chat_history(form.get("chat_history", "[]")),
+            "few_shot_examples": few_shot_examples,
         }
     except Exception:
         if upload_path:
@@ -1362,6 +1402,7 @@ def chat_caption():
             prepared["max_output_tokens"],
             prepared["user_prompt"],
             validate_json=prepared["validate_ideogram_json"],
+            few_shot_examples=prepared["few_shot_examples"],
         )
         preprocess_summary = _region_preprocess_summary(prepared["region_payload"]) if prepared["enable_region_preprocess"] else {"enabled": False, "warnings": [], "skipped": False}
         public_caption_meta = {k: v for k, v in caption_meta.items() if k not in ("prompt_used", "initial_user_prompt")}
@@ -1396,9 +1437,13 @@ def chat_caption_stream():
                 "region_preprocess_summary": preprocess_summary,
                 "model_management": prepared["model_management"],
             })
+            target_prompt = prepared["user_prompt"]
+            if prepared["few_shot_examples"]:
+                target_prompt = "The few-shot SAMPLE image/caption pairs above are examples only. Now caption the TARGET visual input below.\n\n" + target_prompt
             messages = [{"role": "system", "content": prepared["system_prompt"]}]
+            messages.extend(_few_shot_messages(prepared["few_shot_examples"]))
             messages.extend(prepared["history"])
-            messages.append({"role": "user", "content": _build_user_content(prepared["user_prompt"], prepared["imgs"])})
+            messages.append({"role": "user", "content": _build_user_content(target_prompt, prepared["imgs"])})
             if prepared["prefill"].strip():
                 messages.append({"role": "assistant", "content": prepared["prefill"].strip()})
             for event_type, token in _stream_chat_completion(messages, prepared["model"], prepared["max_output_tokens"]):
@@ -1749,7 +1794,7 @@ def _process_one_target(fn:str, params:dict):
                 model_management = {"unload_before_preprocess": unload_result, "reload_after_preprocess": reload_result}
             user_prompt = _augment_prompt_with_region_candidates(user_prompt, region_payload)
 
-        caption, caption_meta = _caption_with_validation(imgs, system_prompt_in, model, prefill, media_kind, max_output_tokens, user_prompt, validate_json=validate_ideogram_json)
+        caption, caption_meta = _caption_with_validation(imgs, system_prompt_in, model, prefill, media_kind, max_output_tokens, user_prompt, validate_json=validate_ideogram_json, few_shot_examples=params.get("few_shot_examples"))
         validation = caption_meta.get("validation") or {}
         preprocess_summary = _region_preprocess_summary(region_payload) if enable_region_preprocess else {"enabled": False, "warnings": [], "skipped": False}
         prompt_version = "captionhelper-region-proposal-v1"
@@ -2065,6 +2110,7 @@ def batch_start():
     region_auto_download = bool(data.get("region_auto_download", REGION_PREPROCESS_AUTO_DOWNLOAD))
     region_load_models = bool(data.get("region_load_models", REGION_PREPROCESS_LOAD_MODELS))
     llama_cpp_unload_during_preprocess = bool(data.get("llama_cpp_unload_during_preprocess", LLAMA_CPP_UNLOAD_DURING_PREPROCESS))
+    few_shot_examples = _normalize_few_shot_examples(data.get("few_shot_examples", []))
 
     job_id = uuid.uuid4().hex
     params = {
@@ -2105,6 +2151,7 @@ def batch_start():
         "region_segmenter_model_path": data.get("region_segmenter_model_path") or REGION_PREPROCESS_SEGMENTER_MODEL_PATH,
         "region_ocr_model_path": data.get("region_ocr_model_path") or REGION_PREPROCESS_OCR_MODEL_PATH,
         "llama_cpp_unload_during_preprocess": llama_cpp_unload_during_preprocess,
+        "few_shot_examples": few_shot_examples,
     }
 
     with JOBS_LOCK:
