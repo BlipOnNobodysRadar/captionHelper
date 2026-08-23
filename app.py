@@ -13,7 +13,7 @@ import subprocess
 import tempfile
 import hashlib
 import sys
-from flask import Flask, abort, jsonify, render_template, request, send_from_directory
+from flask import Flask, Response, abort, jsonify, render_template, request, send_from_directory, stream_with_context
 import requests
 from werkzeug.exceptions import RequestEntityTooLarge
 from PIL import Image
@@ -80,7 +80,7 @@ DEFAULT_MODEL = _env_first(
     "LLAMA_CPP_MODEL",
     "LAMMA_CPP_MODEL",
     "LMSTUDIO_MODEL",
-    default="qwen2.5-vl-32b-instruct",
+    default="gemma4-12b-vision",
 )
 DEFAULT_BATCH_CONCURRENCY = int(_env_first("CAPTION_BATCH_CONCURRENCY", "LLAMA_CPP_BATCH_CONCURRENCY", "LAMMA_CPP_BATCH_CONCURRENCY", "LMSTUDIO_BATCH_CONCURRENCY", default="4"))
 MAX_BATCH_CONCURRENCY = int(_env_first("CAPTION_MAX_BATCH_CONCURRENCY", "LLAMA_CPP_MAX_BATCH_CONCURRENCY", "LAMMA_CPP_MAX_BATCH_CONCURRENCY", "LMSTUDIO_MAX_BATCH_CONCURRENCY", default="16"))
@@ -88,7 +88,7 @@ API_REQUEST_RETRIES = int(_env_first("CAPTION_REQUEST_RETRIES", "LLAMA_CPP_REQUE
 API_RETRY_BACKOFF_SEC = float(_env_first("CAPTION_RETRY_BACKOFF_SEC", "LLAMA_CPP_RETRY_BACKOFF_SEC", "LAMMA_CPP_RETRY_BACKOFF_SEC", "LMSTUDIO_RETRY_BACKOFF_SEC", default="2"))
 API_ABORT_AFTER_SERVER_ERRORS = int(_env_first("CAPTION_ABORT_AFTER_SERVER_ERRORS", "LLAMA_CPP_ABORT_AFTER_SERVER_ERRORS", "LAMMA_CPP_ABORT_AFTER_SERVER_ERRORS", "LMSTUDIO_ABORT_AFTER_SERVER_ERRORS", default="3"))
 DEFAULT_MAX_IMAGE_SIDE = int(_env_first("CAPTION_MAX_IMAGE_SIDE", "LLAMA_CPP_MAX_IMAGE_SIDE", "LAMMA_CPP_MAX_IMAGE_SIDE", "LMSTUDIO_MAX_IMAGE_SIDE", default="1024"))
-DEFAULT_MAX_OUTPUT_TOKENS = int(_env_first("CAPTION_MAX_OUTPUT_TOKENS", "LLAMA_CPP_MAX_OUTPUT_TOKENS", "LAMMA_CPP_MAX_OUTPUT_TOKENS", "LMSTUDIO_MAX_OUTPUT_TOKENS", default="512"))
+DEFAULT_MAX_OUTPUT_TOKENS = int(_env_first("CAPTION_MAX_OUTPUT_TOKENS", "LLAMA_CPP_MAX_OUTPUT_TOKENS", "LAMMA_CPP_MAX_OUTPUT_TOKENS", "LMSTUDIO_MAX_OUTPUT_TOKENS", default="0"))
 REGION_PREPROCESS_SCRIPT = _env_first("CAPTION_REGION_PREPROCESS_SCRIPT", default=os.path.join(os.path.dirname(__file__), "vision_preprocess.py"))
 REGION_PREPROCESS_DETECTOR = _env_first("CAPTION_REGION_DETECTOR", default="groundingdino")
 REGION_PREPROCESS_SEGMENTER = _env_first("CAPTION_REGION_SEGMENTER", default="none")
@@ -471,6 +471,42 @@ def _build_user_content(user_prompt:str, images_data_urls):
         for url in images_data_urls:
             parts.append({"type":"image_url", "image_url":{"url": url}})
     return parts
+
+
+def _normalize_few_shot_examples(raw)->list[dict]:
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw or "[]")
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(raw, list):
+        return []
+    examples = []
+    for idx, item in enumerate(raw[:6], start=1):
+        if not isinstance(item, dict):
+            continue
+        caption = str(item.get("caption") or "").strip()
+        image_url = str(item.get("image_data_url") or item.get("image_url") or "").strip()
+        name = str(item.get("name") or f"example {idx}").strip()
+        if not caption or not image_url.startswith("data:image/"):
+            continue
+        examples.append({"caption": caption, "image_data_url": image_url, "name": name[:120]})
+    return examples
+
+
+def _few_shot_messages(examples:list[dict])->list[dict]:
+    messages = []
+    for idx, example in enumerate(examples or [], start=1):
+        name = example.get("name") or f"example {idx}"
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": f"Few-shot example {idx}. This is a SAMPLE image named {name}. Study the image and its matching caption format; do not caption the final target yet."},
+                {"type": "image_url", "image_url": {"url": example["image_data_url"]}},
+            ],
+        })
+        messages.append({"role": "assistant", "content": example.get("caption", "")})
+    return messages
 
 
 def _sha256_file(path:str)->str:
@@ -890,17 +926,19 @@ def _is_retryable_api_status(status_code:int)->bool:
     return status_code in {400, 408, 409, 425, 429, 500, 502, 503, 504}
 
 
-def call_vision_api(images_data_urls, system_prompt:str, model:str, prefill:str="", media_kind:str="clip", max_output_tokens:int=DEFAULT_MAX_OUTPUT_TOKENS, user_prompt:str=""):
+def call_vision_api(images_data_urls, system_prompt:str, model:str, prefill:str="", media_kind:str="clip", max_output_tokens:int=DEFAULT_MAX_OUTPUT_TOKENS, user_prompt:str="", few_shot_examples=None):
     if not user_prompt:
         if media_kind == "image":
             user_prompt = "You are given a single still image. Write a descriptive caption.\n\n[image]"
         else:
             user_prompt = "You are given a few frames sampled from a short video clip. Write a descriptive caption for the clip as a whole.\n\n[image]"
 
-    messages = [
-        {"role":"system","content": (system_prompt or "").strip()},
-        {"role":"user","content": _build_user_content(user_prompt, images_data_urls)}
-    ]
+    target_prompt = (user_prompt or "").strip()
+    if few_shot_examples:
+        target_prompt = "The few-shot SAMPLE image/caption pairs above are examples only. Now caption the TARGET visual input below.\n\n" + target_prompt
+    messages = [{"role":"system","content": (system_prompt or "").strip()}]
+    messages.extend(_few_shot_messages(few_shot_examples or []))
+    messages.append({"role":"user","content": _build_user_content(target_prompt, images_data_urls)})
 
     payload = {
         "model": model or DEFAULT_MODEL,
@@ -1030,8 +1068,8 @@ def validate_ideogram4_json_caption(caption:str)->dict:
     return {"valid": not errors, "errors": errors, "data": data}
 
 
-def _caption_with_validation(imgs, system_prompt, model, prefill, media_kind, max_output_tokens, user_prompt, validate_json=False):
-    caption = call_vision_api(imgs, system_prompt, model, prefill=prefill, media_kind=media_kind, max_output_tokens=max_output_tokens, user_prompt=user_prompt)
+def _caption_with_validation(imgs, system_prompt, model, prefill, media_kind, max_output_tokens, user_prompt, validate_json=False, few_shot_examples=None):
+    caption = call_vision_api(imgs, system_prompt, model, prefill=prefill, media_kind=media_kind, max_output_tokens=max_output_tokens, user_prompt=user_prompt, few_shot_examples=few_shot_examples)
     validation = validate_ideogram4_json_caption(caption) if validate_json else {"valid": True, "errors": []}
     retried = False
     if validate_json and not validation["valid"]:
@@ -1042,7 +1080,7 @@ def _caption_with_validation(imgs, system_prompt, model, prefill, media_kind, ma
             + "\n\nReturn corrected Ideogram 4 JSON only. Do not include commentary."
         )
         retried = True
-        caption = call_vision_api(imgs, system_prompt, model, prefill=prefill, media_kind=media_kind, max_output_tokens=max_output_tokens, user_prompt=retry_prompt)
+        caption = call_vision_api(imgs, system_prompt, model, prefill=prefill, media_kind=media_kind, max_output_tokens=max_output_tokens, user_prompt=retry_prompt, few_shot_examples=few_shot_examples)
         validation = validate_ideogram4_json_caption(caption)
     return caption, {
         "validation": validation,
@@ -1050,6 +1088,208 @@ def _caption_with_validation(imgs, system_prompt, model, prefill, media_kind, ma
         "prompt_used": retry_prompt if retried else user_prompt,
         "initial_user_prompt": user_prompt,
     }
+
+
+def _json_sse(event:str, payload:dict)->str:
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _stream_chat_completion(messages:list, model:str, max_output_tokens:int=DEFAULT_MAX_OUTPUT_TOKENS):
+    payload = {
+        "model": model or DEFAULT_MODEL,
+        "messages": messages,
+        "temperature": 0.2,
+        "stream": True,
+    }
+    if BACKEND == "lmstudio":
+        payload["add_generation_prompt"] = True
+    try:
+        max_output_tokens = int(max_output_tokens)
+    except (TypeError, ValueError):
+        max_output_tokens = DEFAULT_MAX_OUTPUT_TOKENS
+    if max_output_tokens > 0:
+        payload["max_tokens"] = max_output_tokens
+
+    url = f"{API_BASE_URL}/chat/completions"
+    with requests.post(url, json=payload, timeout=300, stream=True) as r:
+        if not r.ok:
+            detail = _api_error_detail(r)
+            raise VisionAPIRequestError(r.status_code, f"{BACKEND_DISPLAY_NAME} HTTP {r.status_code}: {detail}", detail)
+        for raw_line in r.iter_lines(decode_unicode=True):
+            if not raw_line:
+                continue
+            line = raw_line.strip()
+            if line.startswith("data:"):
+                line = line[5:].strip()
+            if not line or line == "[DONE]":
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            for choice in data.get("choices") or []:
+                delta = choice.get("delta") or {}
+                thinking = (
+                    delta.get("reasoning_content")
+                    or delta.get("reasoning")
+                    or delta.get("thinking")
+                    or delta.get("thought")
+                )
+                if thinking:
+                    yield "thinking", thinking
+                token = delta.get("content")
+                if token:
+                    yield "token", token
+                message = choice.get("message") or {}
+                content = message.get("content")
+                if content:
+                    yield "token", content
+
+
+def _safe_chat_history(raw:str)->list:
+    try:
+        history = json.loads(raw or "[]")
+    except json.JSONDecodeError:
+        return []
+    safe = []
+    if not isinstance(history, list):
+        return safe
+    for item in history[-12:]:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        content = str(item.get("content") or "").strip()
+        if role in {"user", "assistant"} and content:
+            safe.append({"role": role, "content": content[:8000]})
+    return safe
+
+
+def _prepare_chat_request(form, files):
+    f = files.get("file")
+    image_mode = form.get("image_mode", "false").lower() in ("1", "true", "yes", "on")
+    if f and str(f.mimetype or "").startswith("image/"):
+        image_mode = True
+    elif f and str(f.mimetype or "").startswith("video/"):
+        image_mode = False
+
+    system_prompt_in = form.get("system_prompt", "").strip()
+    if not system_prompt_in:
+        system_prompt_in = DEFAULT_PROMPT_IMAGE if image_mode else DEFAULT_PROMPT_VIDEO
+    elif image_mode and system_prompt_in == DEFAULT_PROMPT_VIDEO:
+        system_prompt_in = DEFAULT_PROMPT_IMAGE
+
+    user_template = form.get("user_template", "").strip() or _default_user_template(image_mode)
+    typed_message = form.get("chat_message", "").strip()
+    metadata_values = {
+        "source_tags": form.get("source_tags", ""),
+        "character_tags": form.get("character_tags", ""),
+        "copyright_tags": form.get("copyright_tags", ""),
+        "artist_tags": form.get("artist_tags", ""),
+        "general_tags": form.get("general_tags", ""),
+        "rating_tags": form.get("rating_tags", ""),
+        "quality_tags": form.get("quality_tags", ""),
+    }
+    model = form.get("model", DEFAULT_MODEL)
+    prefill = form.get("prefill", "")
+    max_image_side = _clamp_int(form.get("max_image_side", DEFAULT_MAX_IMAGE_SIDE), DEFAULT_MAX_IMAGE_SIDE, 0, 8192)
+    max_output_tokens = _clamp_int(form.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS), DEFAULT_MAX_OUTPUT_TOKENS, 0, 8192)
+    use_existing = form.get("use_existing_caption", "false").lower() in ("1", "true", "yes", "on")
+    existing_caption_text = form.get("existing_caption", "")
+    enable_region_preprocess = form.get("enable_region_preprocess", "false").lower() in ("1", "true", "yes", "on")
+    validate_ideogram_json = form.get("validate_ideogram_json", "false").lower() in ("1", "true", "yes", "on")
+    few_shot_examples = _normalize_few_shot_examples(form.get("few_shot_examples", "[]"))
+    media_kind = "image" if image_mode else "clip"
+
+    tmpdir = "tmp_uploads"
+    os.makedirs(tmpdir, exist_ok=True)
+    upload_path = None
+    imgs = []
+    original_name = ""
+    try:
+        if f:
+            original_name = f.filename or "upload"
+            _, ext = os.path.splitext(original_name)
+            upload_path = os.path.join(tmpdir, f"{uuid.uuid4().hex}{ext}")
+            f.save(upload_path)
+            if image_mode:
+                if not allowed_image(upload_path):
+                    raise RuntimeError("Unsupported image file extension")
+                imgs = [image_to_data_url(upload_path, max_image_side=max_image_side)]
+            else:
+                if not allowed_video(upload_path):
+                    raise RuntimeError("Unsupported video file extension")
+                try:
+                    num_frames = int(form.get("num_frames", "5"))
+                except Exception:
+                    num_frames = 5
+                sampling = form.get("sampling_type", "uniform")
+                imgs = extract_frames(upload_path, num_frames, sampling, max_image_side=max_image_side)
+
+        if not imgs and not typed_message:
+            raise RuntimeError("Attach a file or enter a chat message first.")
+        if f and not imgs:
+            raise RuntimeError("No visual inputs found for captioning")
+
+        existing_for_prompt = existing_caption_text if use_existing else ""
+        context = _context_from_request_values(metadata_values, existing_for_prompt, image_mode=image_mode, input_count=max(1, len(imgs)))
+        user_prompt = _render_user_template(user_template, context)
+        if typed_message:
+            user_prompt = f"{user_prompt}\n\nUser follow-up/message:\n{typed_message}" if imgs else typed_message
+
+        region_payload = None
+        model_management = None
+        if upload_path and image_mode and enable_region_preprocess:
+            unload_enabled = form.get("llama_cpp_unload_during_preprocess", str(LLAMA_CPP_UNLOAD_DURING_PREPROCESS)).lower() in ("1", "true", "yes", "on")
+            unload_result = _maybe_unload_llamacpp_for_preprocess(model, enabled=unload_enabled)
+            region_payload = _run_region_preprocess(
+                upload_path,
+                tags_text=_detector_tags_from_context(context),
+                params={
+                    "enable_region_preprocess": True,
+                    "region_detector": form.get("region_detector") or REGION_PREPROCESS_DETECTOR,
+                    "region_segmenter": form.get("region_segmenter") or REGION_PREPROCESS_SEGMENTER,
+                    "region_ocr": form.get("region_ocr") or REGION_PREPROCESS_OCR,
+                    "region_max_regions": form.get("region_max_regions") or REGION_PREPROCESS_MAX_REGIONS,
+                    "region_ocr_threshold": form.get("region_ocr_threshold") or REGION_PREPROCESS_OCR_THRESHOLD,
+                    "region_detector_box_threshold": form.get("region_detector_box_threshold") or REGION_PREPROCESS_DETECTOR_BOX_THRESHOLD,
+                    "region_detector_text_threshold": form.get("region_detector_text_threshold") or REGION_PREPROCESS_DETECTOR_TEXT_THRESHOLD,
+                    "region_device": form.get("region_device") or REGION_PREPROCESS_DEVICE,
+                    "region_model_root": form.get("region_model_root") or REGION_PREPROCESS_MODEL_ROOT,
+                    "region_auto_download": form.get("region_auto_download", "true").lower() in ("1", "true", "yes", "on"),
+                    "region_load_models": form.get("region_load_models", "true").lower() in ("1", "true", "yes", "on"),
+                    "region_detector_model_path": form.get("region_detector_model_path") or REGION_PREPROCESS_DETECTOR_MODEL_PATH,
+                    "region_segmenter_model_path": form.get("region_segmenter_model_path") or REGION_PREPROCESS_SEGMENTER_MODEL_PATH,
+                    "region_ocr_model_path": form.get("region_ocr_model_path") or REGION_PREPROCESS_OCR_MODEL_PATH,
+                },
+            )
+            reload_result = _maybe_reload_llamacpp_after_preprocess(model, unload_result)
+            model_management = {"unload_before_preprocess": unload_result, "reload_after_preprocess": reload_result}
+            user_prompt = _augment_prompt_with_region_candidates(user_prompt, region_payload)
+
+        return {
+            "upload_path": upload_path,
+            "original_name": original_name,
+            "imgs": imgs,
+            "system_prompt": system_prompt_in,
+            "user_prompt": user_prompt,
+            "model": model,
+            "prefill": prefill,
+            "max_output_tokens": max_output_tokens,
+            "media_kind": media_kind,
+            "validate_ideogram_json": validate_ideogram_json,
+            "enable_region_preprocess": enable_region_preprocess,
+            "region_payload": region_payload,
+            "model_management": model_management,
+            "history": _safe_chat_history(form.get("chat_history", "[]")),
+            "few_shot_examples": few_shot_examples,
+        }
+    except Exception:
+        if upload_path:
+            try:
+                os.remove(upload_path)
+            except Exception:
+                pass
+        raise
 
 # ------------------ Simple chat route ------------------
 @app.route("/")
@@ -1150,106 +1390,82 @@ def api_delete_user_preset(preset_id):
 
 @app.route("/api/chat-caption", methods=["POST"])
 def chat_caption():
-    f = request.files.get("file")
-    if not f:
-        return jsonify({"error":"No file uploaded"}), 400
-
-    image_mode = request.form.get("image_mode","false").lower() in ("1","true","yes","on")
-    system_prompt_in = request.form.get("system_prompt","").strip()
-    if not system_prompt_in:
-        system_prompt_in = DEFAULT_PROMPT_IMAGE if image_mode else DEFAULT_PROMPT_VIDEO
-    elif image_mode and system_prompt_in == DEFAULT_PROMPT_VIDEO:
-        system_prompt_in = DEFAULT_PROMPT_IMAGE
-
-    user_template = request.form.get("user_template", "").strip() or _default_user_template(image_mode)
-    metadata_values = {
-        "source_tags": request.form.get("source_tags", ""),
-        "character_tags": request.form.get("character_tags", ""),
-        "copyright_tags": request.form.get("copyright_tags", ""),
-        "artist_tags": request.form.get("artist_tags", ""),
-        "general_tags": request.form.get("general_tags", ""),
-        "rating_tags": request.form.get("rating_tags", ""),
-        "quality_tags": request.form.get("quality_tags", ""),
-    }
-    model = request.form.get("model", DEFAULT_MODEL)
-    prefill = request.form.get("prefill","")
-    max_image_side = _clamp_int(request.form.get("max_image_side", DEFAULT_MAX_IMAGE_SIDE), DEFAULT_MAX_IMAGE_SIDE, 0, 8192)
-    max_output_tokens = _clamp_int(request.form.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS), DEFAULT_MAX_OUTPUT_TOKENS, 0, 8192)
-    use_existing = request.form.get("use_existing_caption","false").lower() in ("1","true","yes","on")
-    existing_caption_text = request.form.get("existing_caption","")
-    enable_region_preprocess = request.form.get("enable_region_preprocess","false").lower() in ("1","true","yes","on")
-    validate_ideogram_json = request.form.get("validate_ideogram_json","false").lower() in ("1","true","yes","on")
-
-    media_kind = "image" if image_mode else "clip"
-
-    tmpdir = "tmp_uploads"
-    os.makedirs(tmpdir, exist_ok=True)
-    original_name = f.filename or "upload"
-    _, ext = os.path.splitext(original_name)
-    upload_path = os.path.join(tmpdir, f"{uuid.uuid4().hex}{ext}")
-    f.save(upload_path)
-
+    prepared = None
     try:
-        if image_mode:
-            if not allowed_image(upload_path):
-                raise RuntimeError("Unsupported image file extension")
-            imgs = [image_to_data_url(upload_path, max_image_side=max_image_side)]
-        else:
-            if not allowed_video(upload_path):
-                raise RuntimeError("Unsupported video file extension")
-            try:
-                num_frames = int(request.form.get("num_frames","5"))
-            except:
-                num_frames = 5
-            sampling = request.form.get("sampling_type","uniform")
-            imgs = extract_frames(upload_path, num_frames, sampling, max_image_side=max_image_side)
-
-        if not imgs:
-            raise RuntimeError("No visual inputs found for captioning")
-
-        existing_for_prompt = existing_caption_text if use_existing else ""
-        context = _context_from_request_values(metadata_values, existing_for_prompt, image_mode=image_mode, input_count=len(imgs))
-        user_prompt = _render_user_template(user_template, context)
-        region_payload = None
-        model_management = None
-        if image_mode and enable_region_preprocess:
-            unload_enabled = request.form.get("llama_cpp_unload_during_preprocess", str(LLAMA_CPP_UNLOAD_DURING_PREPROCESS)).lower() in ("1","true","yes","on")
-            unload_result = _maybe_unload_llamacpp_for_preprocess(model, enabled=unload_enabled)
-            region_payload = _run_region_preprocess(
-                upload_path,
-                tags_text=_detector_tags_from_context(context),
-                params={
-                    "enable_region_preprocess": True,
-                    "region_detector": request.form.get("region_detector") or REGION_PREPROCESS_DETECTOR,
-                    "region_segmenter": request.form.get("region_segmenter") or REGION_PREPROCESS_SEGMENTER,
-                    "region_ocr": request.form.get("region_ocr") or REGION_PREPROCESS_OCR,
-                    "region_max_regions": request.form.get("region_max_regions") or REGION_PREPROCESS_MAX_REGIONS,
-                    "region_ocr_threshold": request.form.get("region_ocr_threshold") or REGION_PREPROCESS_OCR_THRESHOLD,
-                    "region_detector_box_threshold": request.form.get("region_detector_box_threshold") or REGION_PREPROCESS_DETECTOR_BOX_THRESHOLD,
-                    "region_detector_text_threshold": request.form.get("region_detector_text_threshold") or REGION_PREPROCESS_DETECTOR_TEXT_THRESHOLD,
-                    "region_device": request.form.get("region_device") or REGION_PREPROCESS_DEVICE,
-                    "region_model_root": request.form.get("region_model_root") or REGION_PREPROCESS_MODEL_ROOT,
-                    "region_auto_download": request.form.get("region_auto_download","true").lower() in ("1","true","yes","on"),
-                    "region_load_models": request.form.get("region_load_models","true").lower() in ("1","true","yes","on"),
-                    "region_detector_model_path": request.form.get("region_detector_model_path") or REGION_PREPROCESS_DETECTOR_MODEL_PATH,
-                    "region_segmenter_model_path": request.form.get("region_segmenter_model_path") or REGION_PREPROCESS_SEGMENTER_MODEL_PATH,
-                    "region_ocr_model_path": request.form.get("region_ocr_model_path") or REGION_PREPROCESS_OCR_MODEL_PATH,
-                },
-            )
-            reload_result = _maybe_reload_llamacpp_after_preprocess(model, unload_result)
-            model_management = {"unload_before_preprocess": unload_result, "reload_after_preprocess": reload_result}
-            user_prompt = _augment_prompt_with_region_candidates(user_prompt, region_payload)
-        caption, caption_meta = _caption_with_validation(imgs, system_prompt_in, model, prefill, media_kind, max_output_tokens, user_prompt, validate_json=validate_ideogram_json)
-        preprocess_summary = _region_preprocess_summary(region_payload) if enable_region_preprocess else {"enabled": False, "warnings": [], "skipped": False}
+        prepared = _prepare_chat_request(request.form, request.files)
+        caption, caption_meta = _caption_with_validation(
+            prepared["imgs"],
+            prepared["system_prompt"],
+            prepared["model"],
+            prepared["prefill"],
+            prepared["media_kind"],
+            prepared["max_output_tokens"],
+            prepared["user_prompt"],
+            validate_json=prepared["validate_ideogram_json"],
+            few_shot_examples=prepared["few_shot_examples"],
+        )
+        preprocess_summary = _region_preprocess_summary(prepared["region_payload"]) if prepared["enable_region_preprocess"] else {"enabled": False, "warnings": [], "skipped": False}
         public_caption_meta = {k: v for k, v in caption_meta.items() if k not in ("prompt_used", "initial_user_prompt")}
-        return jsonify({"caption": caption, "frames_used": len(imgs), "region_preprocess": region_payload, "region_preprocess_summary": preprocess_summary, "model_management": model_management, **public_caption_meta})
+        return jsonify({
+            "caption": caption,
+            "frames_used": len(prepared["imgs"]),
+            "region_preprocess": prepared["region_payload"],
+            "region_preprocess_summary": preprocess_summary,
+            "model_management": prepared["model_management"],
+            **public_caption_meta,
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     finally:
+        if prepared and prepared.get("upload_path"):
+            try:
+                os.remove(prepared["upload_path"])
+            except Exception:
+                pass
+
+
+@app.route("/api/chat-caption-stream", methods=["POST"])
+def chat_caption_stream():
+    def generate():
+        prepared = None
+        final_text = []
         try:
-            os.remove(upload_path)
-        except:
-            pass
+            prepared = _prepare_chat_request(request.form, request.files)
+            preprocess_summary = _region_preprocess_summary(prepared["region_payload"]) if prepared["enable_region_preprocess"] else {"enabled": False, "warnings": [], "skipped": False}
+            yield _json_sse("meta", {
+                "frames_used": len(prepared["imgs"]),
+                "region_preprocess_summary": preprocess_summary,
+                "model_management": prepared["model_management"],
+            })
+            target_prompt = prepared["user_prompt"]
+            if prepared["few_shot_examples"]:
+                target_prompt = "The few-shot SAMPLE image/caption pairs above are examples only. Now caption the TARGET visual input below.\n\n" + target_prompt
+            messages = [{"role": "system", "content": prepared["system_prompt"]}]
+            messages.extend(_few_shot_messages(prepared["few_shot_examples"]))
+            messages.extend(prepared["history"])
+            messages.append({"role": "user", "content": _build_user_content(target_prompt, prepared["imgs"])})
+            if prepared["prefill"].strip():
+                messages.append({"role": "assistant", "content": prepared["prefill"].strip()})
+            for event_type, token in _stream_chat_completion(messages, prepared["model"], prepared["max_output_tokens"]):
+                if event_type == "thinking":
+                    yield _json_sse("thinking", {"token": token})
+                else:
+                    final_text.append(token)
+                    yield _json_sse("token", {"token": token})
+            caption = _clean_model_caption_output("".join(final_text))
+            if not caption:
+                yield _json_sse("error", {"error": "Backend returned an empty caption."})
+            else:
+                yield _json_sse("done", {"caption": caption})
+        except Exception as exc:
+            yield _json_sse("error", {"error": str(exc)})
+        finally:
+            if prepared and prepared.get("upload_path"):
+                try:
+                    os.remove(prepared["upload_path"])
+                except Exception:
+                    pass
+    return Response(stream_with_context(generate()), mimetype="text/event-stream")
 
 # ------------------ Batch job system ------------------
 JOBS = {}
@@ -1578,7 +1794,7 @@ def _process_one_target(fn:str, params:dict):
                 model_management = {"unload_before_preprocess": unload_result, "reload_after_preprocess": reload_result}
             user_prompt = _augment_prompt_with_region_candidates(user_prompt, region_payload)
 
-        caption, caption_meta = _caption_with_validation(imgs, system_prompt_in, model, prefill, media_kind, max_output_tokens, user_prompt, validate_json=validate_ideogram_json)
+        caption, caption_meta = _caption_with_validation(imgs, system_prompt_in, model, prefill, media_kind, max_output_tokens, user_prompt, validate_json=validate_ideogram_json, few_shot_examples=params.get("few_shot_examples"))
         validation = caption_meta.get("validation") or {}
         preprocess_summary = _region_preprocess_summary(region_payload) if enable_region_preprocess else {"enabled": False, "warnings": [], "skipped": False}
         prompt_version = "captionhelper-region-proposal-v1"
@@ -1894,6 +2110,7 @@ def batch_start():
     region_auto_download = bool(data.get("region_auto_download", REGION_PREPROCESS_AUTO_DOWNLOAD))
     region_load_models = bool(data.get("region_load_models", REGION_PREPROCESS_LOAD_MODELS))
     llama_cpp_unload_during_preprocess = bool(data.get("llama_cpp_unload_during_preprocess", LLAMA_CPP_UNLOAD_DURING_PREPROCESS))
+    few_shot_examples = _normalize_few_shot_examples(data.get("few_shot_examples", []))
 
     job_id = uuid.uuid4().hex
     params = {
@@ -1934,6 +2151,7 @@ def batch_start():
         "region_segmenter_model_path": data.get("region_segmenter_model_path") or REGION_PREPROCESS_SEGMENTER_MODEL_PATH,
         "region_ocr_model_path": data.get("region_ocr_model_path") or REGION_PREPROCESS_OCR_MODEL_PATH,
         "llama_cpp_unload_during_preprocess": llama_cpp_unload_during_preprocess,
+        "few_shot_examples": few_shot_examples,
     }
 
     with JOBS_LOCK:

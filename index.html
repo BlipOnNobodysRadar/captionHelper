@@ -2,30 +2,44 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>llama.cpp/OpenAI-compatible Video/Image Captioner</title>
+  <title>Caption Helper</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <div class="layout">
     <main class="chat">
-      <h2>Multiturn chat outputs, separated between user and LLM</h2>
-      <p id="backendInfo" class="backend-info">Backend: loading…</p>
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Local vision caption workspace</p>
+          <h1>Caption Helper</h1>
+          <p class="hero-copy">Attach an image or clip, tune the prompt, and generate clean dataset captions without leaving the browser.</p>
+        </div>
+        <div class="hero-status">
+          <p id="backendInfo" class="backend-info">Backend: loading…</p>
+          <div class="chat-actions" aria-label="Chat actions">
+            <button type="button" id="newChatBtn">New chat</button>
+            <button type="button" id="clearChatBtn">Clear chat</button>
+          </div>
+        </div>
+      </header>
 
       <div id="chatLog" class="chatlog"></div>
 
       <div class="composer">
-        <label class="filedrop">
-          <input type="file" id="clipInput" accept="video/*">
-          <span>message/drop in image or clip attachment</span>
+        <label class="filedrop" id="fileDrop">
+          <input type="file" id="clipInput" accept="video/*,image/*">
+          <span class="filedrop-copy"><strong>Drop a file or click to browse</strong><small>Images and videos are supported based on mode.</small></span>
         </label>
+        <div id="attachmentPreview" class="attachment-preview" hidden></div>
+        <textarea id="chatMessage" class="chat-input" rows="3" placeholder="Optional follow-up message for multi-turn chat…"></textarea>
         <button id="sendBtn">Send & Caption</button>
       </div>
     </main>
 
     <aside class="side">
       <section class="card">
-        <h3>caption preset + prompts</h3>
+        <h3>Caption preset & prompts</h3>
         <div class="row">
           <label>Preset:</label>
           <select id="captionPreset"></select>
@@ -45,14 +59,39 @@
           <textarea id="userTemplate" rows="7" placeholder="Use [image] where image/video frames should be inserted. Available placeholders: {existing_caption}, {source_tags}, {character_tags}, {copyright_tags}, {artist_tags}, {general_tags}, {rating_tags}, {quality_tags}, {media_kind}, {input_count}"></textarea>
           <small style="color:#8a90a6">Lines with only empty placeholders are omitted, so metadata blocks can be optional.</small>
         </div>
+        <details class="metadata-details few-shot-details">
+          <summary>Few-shot image + caption examples</summary>
+          <small>Optional. Each sample image is sent before the target, labeled as an example, followed by its matching caption as an assistant response. The target image/clip is labeled separately after the examples.</small>
+          <div class="few-shot-grid">
+            <div class="few-shot-example">
+              <label>Example 1 image:</label>
+              <input id="fewShotImage1" type="file" accept="image/*">
+              <label>Example 1 caption:</label>
+              <textarea id="fewShotCaption1" rows="3" placeholder="Matching caption / Ideogram JSON for example 1"></textarea>
+            </div>
+            <div class="few-shot-example">
+              <label>Example 2 image:</label>
+              <input id="fewShotImage2" type="file" accept="image/*">
+              <label>Example 2 caption:</label>
+              <textarea id="fewShotCaption2" rows="3" placeholder="Matching caption / Ideogram JSON for example 2"></textarea>
+            </div>
+            <div class="few-shot-example">
+              <label>Example 3 image:</label>
+              <input id="fewShotImage3" type="file" accept="image/*">
+              <label>Example 3 caption:</label>
+              <textarea id="fewShotCaption3" rows="3" placeholder="Matching caption / Ideogram JSON for example 3"></textarea>
+            </div>
+          </div>
+        </details>
+
       </section>
 
       <section class="card">
-        <h3>settings</h3>
+        <h3>Settings</h3>
 
         <div class="row">
           <label>Model:</label>
-          <input id="modelName" placeholder="qwen2.5-vl-32b-instruct">
+          <input id="modelName" placeholder="gemma4-12b-vision">
         </div>
 
         <div class="row">
@@ -226,7 +265,7 @@
       </section>
 
       <section class="card">
-        <h3>Batch Process Args</h3>
+        <h3>Batch processing</h3>
         <div class="row">
           <label>Target folder:</label>
           <input id="targetFolder" placeholder="/path/to/clips_or_images">

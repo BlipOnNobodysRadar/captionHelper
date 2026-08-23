@@ -1,6 +1,13 @@
 const chatLog = document.getElementById('chatLog');
 const sendBtn = document.getElementById('sendBtn');
 const clipInput = document.getElementById('clipInput');
+const fileDrop = document.getElementById('fileDrop');
+const attachmentPreview = document.getElementById('attachmentPreview');
+const chatMessage = document.getElementById('chatMessage');
+const newChatBtn = document.getElementById('newChatBtn');
+const clearChatBtn = document.getElementById('clearChatBtn');
+let currentAttachmentUrl = '';
+let chatHistory = [];
 
 const imageModeToggle = document.getElementById('imageMode');
 const captionPresetSelect = document.getElementById('captionPreset');
@@ -10,11 +17,7 @@ const presetStatus = document.getElementById('presetStatus');
 let captionPresets = [];
 
 function refreshAccept(){
-  if (imageModeToggle && imageModeToggle.checked) {
-    clipInput.setAttribute('accept', 'image/*');
-  } else {
-    clipInput.setAttribute('accept', 'video/*');
-  }
+  clipInput.setAttribute('accept', 'image/*,video/*');
 }
 if (imageModeToggle) {
   imageModeToggle.addEventListener('change', refreshAccept);
@@ -59,6 +62,8 @@ function applyPreset(preset) {
 
   const savedSettings = preset.saved_settings || {};
   setFieldValue('modelName', savedSettings.model ?? preset.model);
+  const modelNameField = document.getElementById('modelName');
+  if (modelNameField && !modelNameField.value) modelNameField.value = modelNameField.placeholder || 'gemma4-12b-vision';
   setFieldValue('targetFolder', savedSettings.target_folder ?? preset.target_folder);
   setFieldValue('numFrames', savedSettings.num_frames ?? preset.num_frames);
   setFieldValue('samplingType', savedSettings.sampling_type ?? preset.sampling_type);
@@ -115,8 +120,9 @@ if (captionPresetSelect) {
   captionPresetSelect.addEventListener('change', () => applyPreset(getSelectedPreset()));
 }
 
-function collectPresetPayload(name, id = '') {
-  const batchSettings = getBatchBody();
+async function collectPresetPayload(name, id = '') {
+  const batchSettings = await getBatchBody();
+  delete batchSettings.few_shot_examples;
   return {
     id,
     name,
@@ -139,7 +145,7 @@ async function saveCurrentPreset() {
   const name = window.prompt('Name for this user preset:', defaultName);
   if (!name || !name.trim()) return;
   const updateExisting = selected && selected.source === 'user';
-  const payload = collectPresetPayload(name.trim(), updateExisting ? selected.id : '');
+  const payload = await collectPresetPayload(name.trim(), updateExisting ? selected.id : '');
 
   try {
     setPresetStatus('Saving preset…');
@@ -206,6 +212,37 @@ function readMetadataFields() {
     rating_tags: document.getElementById('ratingTags').value,
     quality_tags: document.getElementById('qualityTags').value
   };
+}
+
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener('load', () => resolve(reader.result));
+    reader.addEventListener('error', () => reject(reader.error || new Error('Unable to read file')));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function collectFewShotExamples() {
+  const examples = [];
+  for (let i = 1; i <= 3; i++) {
+    const file = document.getElementById(`fewShotImage${i}`)?.files?.[0];
+    const caption = document.getElementById(`fewShotCaption${i}`)?.value?.trim() || '';
+    if (!file && !caption) continue;
+    if (!file || !caption) {
+      throw new Error(`Few-shot example ${i} needs both an image and a matching caption.`);
+    }
+    if (!selectedFileLooksLikeImage(file)) {
+      throw new Error(`Few-shot example ${i} must be an image file.`);
+    }
+    examples.push({
+      name: file.name,
+      caption,
+      image_data_url: await fileToDataUrl(file)
+    });
+  }
+  return examples;
 }
 
 async function loadBackendConfig() {
@@ -288,14 +325,6 @@ async function loadBackendConfig() {
 }
 loadBackendConfig();
 
-function addMsg(who, text) {
-  const div = document.createElement('div');
-  div.className = 'msg ' + who;
-  div.textContent = text;
-  chatLog.appendChild(div);
-  chatLog.scrollTop = chatLog.scrollHeight;
-}
-
 function formatRegionPreprocessNotice(summary) {
   if (!summary || !summary.enabled) return '';
   const warnings = Array.isArray(summary.warnings) ? summary.warnings.filter(Boolean) : [];
@@ -321,9 +350,136 @@ function formatModelManagementNotice(modelManagement) {
   return lines.join('\n');
 }
 
-async function postChatCaption(file) {
+function selectedFileLooksLikeImage(file) {
+  return Boolean(file && (file.type || '').startsWith('image/')) || /\.(png|jpe?g|webp|bmp|gif)$/i.test(file?.name || '');
+}
+
+function selectedFileLooksLikeVideo(file) {
+  return Boolean(file && (file.type || '').startsWith('video/')) || /\.(mp4|mov|avi|webm|mkv|m4v)$/i.test(file?.name || '');
+}
+
+function setAttachmentFile(file) {
+  if (!file) return;
+  if (imageModeToggle) {
+    if (selectedFileLooksLikeImage(file)) imageModeToggle.checked = true;
+    if (selectedFileLooksLikeVideo(file)) imageModeToggle.checked = false;
+    refreshAccept();
+  }
+  renderAttachmentPreview(file);
+}
+
+function attachFileToInput(file) {
+  if (!file || !clipInput) return;
+  const transfer = new DataTransfer();
+  transfer.items.add(file);
+  clipInput.files = transfer.files;
+  setAttachmentFile(file);
+}
+
+function firstUsableFile(fileList) {
+  return Array.from(fileList || []).find(file => selectedFileLooksLikeImage(file) || selectedFileLooksLikeVideo(file)) || null;
+}
+
+function autoSizeChatInput() {
+  if (!chatMessage) return;
+  chatMessage.style.height = 'auto';
+  const maxHeight = Math.round(window.innerHeight * 0.32);
+  chatMessage.style.height = `${Math.min(chatMessage.scrollHeight, maxHeight)}px`;
+}
+
+function renderAttachmentPreview(file) {
+  if (!attachmentPreview) return;
+  if (currentAttachmentUrl) {
+    URL.revokeObjectURL(currentAttachmentUrl);
+    currentAttachmentUrl = '';
+  }
+  attachmentPreview.hidden = !file;
+  attachmentPreview.innerHTML = '';
+  if (!file) return;
+
+  const media = document.createElement(selectedFileLooksLikeImage(file) ? 'img' : 'video');
+  media.className = 'attachment-media';
+  media.alt = file.name;
+  if (media.tagName === 'VIDEO') {
+    currentAttachmentUrl = URL.createObjectURL(file);
+    media.src = currentAttachmentUrl;
+    media.muted = true;
+    media.controls = true;
+    media.playsInline = true;
+  } else {
+    const reader = new FileReader();
+    reader.addEventListener('load', () => { media.src = reader.result; });
+    reader.readAsDataURL(file);
+  }
+
+  const meta = document.createElement('div');
+  meta.className = 'attachment-meta';
+  meta.innerHTML = `<strong>${file.name}</strong><small>${selectedFileLooksLikeImage(file) ? 'Image ready for chat' : 'Video ready for frame sampling'}</small>`;
+  attachmentPreview.append(media, meta);
+}
+
+if (clipInput) {
+  clipInput.addEventListener('change', () => setAttachmentFile(clipInput.files?.[0]));
+}
+
+if (fileDrop) {
+  ['dragenter', 'dragover'].forEach(eventName => {
+    fileDrop.addEventListener(eventName, (event) => {
+      event.preventDefault();
+      fileDrop.classList.add('drag-over');
+    });
+  });
+  ['dragleave', 'drop'].forEach(eventName => {
+    fileDrop.addEventListener(eventName, (event) => {
+      event.preventDefault();
+      fileDrop.classList.remove('drag-over');
+    });
+  });
+  fileDrop.addEventListener('drop', (event) => {
+    const file = firstUsableFile(event.dataTransfer?.files);
+    if (!file) return;
+    attachFileToInput(file);
+  });
+}
+
+if (chatMessage) {
+  chatMessage.addEventListener('input', autoSizeChatInput);
+  chatMessage.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      if (!sendBtn.disabled) sendBtn.click();
+    }
+  });
+  ['dragenter', 'dragover'].forEach(eventName => {
+    chatMessage.addEventListener(eventName, (event) => {
+      if (!Array.from(event.dataTransfer?.types || []).includes('Files')) return;
+      event.preventDefault();
+      chatMessage.classList.add('drag-over');
+    });
+  });
+  ['dragleave', 'drop'].forEach(eventName => {
+    chatMessage.addEventListener(eventName, (event) => {
+      chatMessage.classList.remove('drag-over');
+      if (eventName === 'drop') event.preventDefault();
+    });
+  });
+  chatMessage.addEventListener('drop', (event) => {
+    const file = firstUsableFile(event.dataTransfer?.files);
+    if (file) attachFileToInput(file);
+  });
+  chatMessage.addEventListener('paste', (event) => {
+    const file = firstUsableFile(event.clipboardData?.files);
+    if (file) attachFileToInput(file);
+  });
+  autoSizeChatInput();
+}
+
+async function buildChatFormData(file, messageOverride = null, historyOverride = null) {
   const fd = new FormData();
-  fd.append('file', file);
+  if (file) fd.append('file', file);
+  fd.append('chat_message', messageOverride !== null ? messageOverride : (chatMessage ? chatMessage.value : ''));
+  fd.append('chat_history', JSON.stringify(historyOverride || chatHistory.slice(-12)));
+  fd.append('few_shot_examples', JSON.stringify(await collectFewShotExamples()));
   fd.append('system_prompt', document.getElementById('systemPrompt').value);
   fd.append('num_frames', document.getElementById('numFrames').value);
   fd.append('sampling_type', document.getElementById('samplingType').value);
@@ -352,29 +508,209 @@ async function postChatCaption(file) {
   fd.append('existing_caption', document.getElementById('existingCaption').value);
   appendMetadataFields(fd);
   fd.append('image_mode', imageModeToggle && imageModeToggle.checked);
+  return fd;
+}
 
-  const res = await fetch('/api/chat-caption', { method:'POST', body: fd });
-  return await res.json();
+function addMsg(who, text, extraClass = '') {
+  const div = document.createElement('div');
+  div.className = ['msg', who, extraClass].filter(Boolean).join(' ');
+  div.textContent = text;
+  chatLog.appendChild(div);
+  chatLog.scrollTop = chatLog.scrollHeight;
+  return div;
+}
+
+function clearAttachment() {
+  if (currentAttachmentUrl) {
+    URL.revokeObjectURL(currentAttachmentUrl);
+    currentAttachmentUrl = '';
+  }
+  if (clipInput) clipInput.value = '';
+  if (attachmentPreview) {
+    attachmentPreview.hidden = true;
+    attachmentPreview.innerHTML = '';
+  }
+}
+
+function clearChat({ clearDraft = false, clearFile = false } = {}) {
+  chatHistory = [];
+  chatLog.innerHTML = '';
+  if (clearDraft && chatMessage) {
+    chatMessage.value = '';
+    autoSizeChatInput();
+  }
+  if (clearFile) clearAttachment();
+}
+
+if (clearChatBtn) {
+  clearChatBtn.addEventListener('click', () => clearChat());
+}
+if (newChatBtn) {
+  newChatBtn.addEventListener('click', () => clearChat({ clearDraft: true, clearFile: true }));
+}
+
+function createStreamingAssistantMsg(turn = null) {
+  const div = document.createElement('div');
+  div.className = 'msg assistant streaming';
+
+  const thinkingButton = document.createElement('button');
+  thinkingButton.type = 'button';
+  thinkingButton.className = 'thinking-toggle thinking';
+  thinkingButton.textContent = 'Thinking';
+  thinkingButton.setAttribute('aria-expanded', 'false');
+
+  const thinkingPanel = document.createElement('pre');
+  thinkingPanel.className = 'thinking-panel';
+  thinkingPanel.hidden = true;
+  thinkingPanel.textContent = 'No thinking tokens received yet.';
+
+  const content = document.createElement('div');
+  content.className = 'assistant-content';
+  content.textContent = 'Waiting for response';
+
+  const retryButton = document.createElement('button');
+  retryButton.type = 'button';
+  retryButton.className = 'retry-turn';
+  retryButton.textContent = 'Retry turn';
+  retryButton.hidden = true;
+  retryButton.addEventListener('click', () => {
+    if (turn) retryTurn(turn);
+  });
+
+  thinkingButton.addEventListener('click', () => {
+    thinkingPanel.hidden = !thinkingPanel.hidden;
+    thinkingButton.setAttribute('aria-expanded', String(!thinkingPanel.hidden));
+  });
+
+  div.append(thinkingButton, thinkingPanel, content, retryButton);
+  chatLog.appendChild(div);
+  chatLog.scrollTop = chatLog.scrollHeight;
+  return { div, thinkingButton, thinkingPanel, content, retryButton };
+}
+
+function parseSseEvents(buffer, onEvent) {
+  const blocks = buffer.split('\n\n');
+  const remainder = blocks.pop() || '';
+  for (const block of blocks) {
+    let event = 'message';
+    const dataLines = [];
+    for (const line of block.split('\n')) {
+      if (line.startsWith('event:')) event = line.slice(6).trim();
+      if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+    }
+    if (!dataLines.length) continue;
+    try {
+      onEvent(event, JSON.parse(dataLines.join('\n')));
+    } catch (e) {
+      console.warn('Unable to parse stream event', e);
+    }
+  }
+  return remainder;
+}
+
+async function streamChatCaption(turn) {
+  const res = await fetch('/api/chat-caption-stream', { method: 'POST', body: await buildChatFormData(turn.file, turn.message, turn.historyBefore) });
+  if (!res.ok || !res.body) {
+    let message = `HTTP ${res.status}`;
+    try {
+      const out = await res.json();
+      message = out.error || message;
+    } catch (_) {}
+    throw new Error(message);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let assistantText = '';
+  let thinkingText = '';
+  let notices = '';
+  const assistantMsg = createStreamingAssistantMsg(turn);
+
+  function renderAssistant() {
+    assistantMsg.thinkingButton.classList.toggle('thinking', !assistantText);
+    assistantMsg.thinkingButton.textContent = thinkingText ? 'Thinking tokens' : 'Thinking';
+    assistantMsg.thinkingPanel.textContent = thinkingText || 'No thinking tokens received yet.';
+    assistantMsg.content.textContent = (notices ? notices + '\n\n' : '') + (assistantText || 'Waiting for response');
+    chatLog.scrollTop = chatLog.scrollHeight;
+  }
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    buffer = parseSseEvents(buffer, (event, payload) => {
+      if (event === 'meta') {
+        const framesInfo = (typeof payload.frames_used === 'number' && payload.frames_used > 0) ? ` [inputs: ${payload.frames_used}] ` : '';
+        const preprocessNotice = formatRegionPreprocessNotice(payload.region_preprocess_summary);
+        const modelNotice = formatModelManagementNotice(payload.model_management);
+        notices = [preprocessNotice, modelNotice, framesInfo].filter(Boolean).join('\n');
+        renderAssistant();
+      } else if (event === 'thinking') {
+        thinkingText += payload.token || '';
+        renderAssistant();
+      } else if (event === 'token') {
+        assistantText += payload.token || '';
+        renderAssistant();
+      } else if (event === 'error') {
+        assistantMsg.thinkingButton.classList.remove('thinking');
+        assistantMsg.div.classList.add('error');
+        assistantMsg.content.textContent = 'Error: ' + (payload.error || 'Unknown error');
+        assistantMsg.retryButton.hidden = false;
+      } else if (event === 'done' && payload.caption) {
+        assistantText = payload.caption;
+        renderAssistant();
+        assistantMsg.retryButton.hidden = false;
+      }
+    });
+  }
+  assistantMsg.thinkingButton.classList.remove('thinking');
+  assistantMsg.retryButton.hidden = false;
+  return assistantText.trim();
+}
+
+async function retryTurn(turn) {
+  if (sendBtn.disabled) return;
+  sendBtn.disabled = true;
+  try {
+    const caption = await streamChatCaption(turn);
+    if (caption && !turn.recorded) {
+      chatHistory.push({ role: 'user', content: turn.userText });
+      chatHistory.push({ role: 'assistant', content: caption });
+      turn.recorded = true;
+    }
+  } catch (e) {
+    addMsg('assistant', 'Error: ' + (e.message || e), 'error');
+  } finally {
+    sendBtn.disabled = false;
+  }
 }
 
 sendBtn.addEventListener('click', async () => {
   const file = clipInput.files?.[0];
-  if (!file) { addMsg('assistant', 'Attach a file first.'); return; }
-  addMsg('user', `Attached: ${file.name}`);
-  const regionEnabled = document.getElementById('enableRegionPreprocess')?.checked;
-  const autoDownload = document.getElementById('regionAutoDownload')?.checked;
-  const downloadHint = regionEnabled && autoDownload ? ' If selected preprocessing models are missing, they will be downloaded before captioning.' : '';
-  addMsg('assistant', 'Thinking... preparing inputs and querying the local vision backend' + downloadHint);
+  const message = chatMessage ? chatMessage.value.trim() : '';
+  if (!file && !message) { addMsg('assistant', 'Attach a file or type a message first.'); return; }
 
-  const out = await postChatCaption(file);
-  if (out.error) {
-    addMsg('assistant', 'Error: ' + out.error);
-  } else {
-    const framesInfo = (typeof out.frames_used === 'number') ? ` [inputs: ${out.frames_used}] ` : ' ';
-    const preprocessNotice = formatRegionPreprocessNotice(out.region_preprocess_summary);
-    const modelNotice = formatModelManagementNotice(out.model_management);
-    const notices = [preprocessNotice, modelNotice].filter(Boolean).join('\n\n');
-    addMsg('assistant', (notices ? notices + '\n\n' : '') + framesInfo + out.caption);
+  const userText = [file ? `Attached: ${file.name}` : '', message].filter(Boolean).join('\n\n');
+  const turn = { file, message, userText, historyBefore: chatHistory.slice(-12), recorded: false };
+  addMsg('user', userText);
+  sendBtn.disabled = true;
+  try {
+    const caption = await streamChatCaption(turn);
+    if (caption) {
+      chatHistory.push({ role: 'user', content: userText });
+      chatHistory.push({ role: 'assistant', content: caption });
+      turn.recorded = true;
+    }
+    if (chatMessage) {
+      chatMessage.value = '';
+      autoSizeChatInput();
+    }
+  } catch (e) {
+    addMsg('assistant', 'Error: ' + (e.message || e), 'error');
+  } finally {
+    if (file) clearAttachment();
+    sendBtn.disabled = false;
   }
 });
 
@@ -436,7 +772,7 @@ function renderActiveFiles(active) {
   }).join('\n');
 }
 
-function getBatchBody() {
+async function getBatchBody() {
   return {
     target_folder: document.getElementById('targetFolder').value,
     system_prompt: document.getElementById('systemPrompt').value,
@@ -473,6 +809,7 @@ function getBatchBody() {
     output_subdir_name: document.getElementById('outputSubdirName').value,
     use_existing_caption: document.getElementById('useExistingCaption').checked,
     image_mode: imageModeToggle && imageModeToggle.checked,
+    few_shot_examples: await collectFewShotExamples(),
     ...readMetadataFields()
   };
 }
@@ -582,7 +919,7 @@ startBtn.addEventListener('click', async () => {
   if (resumeBtn) resumeBtn.disabled = true;
 
   try {
-    const body = getBatchBody();
+    const body = await getBatchBody();
     const res = await fetch('/api/batch-start', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
