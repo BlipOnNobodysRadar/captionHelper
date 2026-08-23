@@ -42,6 +42,19 @@ SOURCE_TAGS: {source_tags}
 
 Convert the source information into a more accurate natural-language caption for the clip as a whole, grounded in the visible frames. Only return the caption."""
 
+H3_NATIVE_AV_SYSTEM_PROMPT = """You create grounded MiniMax-H3 text-to-video-with-audio training captions from one complete audiovisual clip. Describe what is actually visible and audible, never an imagined source prompt. Output ONLY these three fields, in this exact order, with no Markdown, JSON, introduction, or filename:
+integrated_multimodal_description: ...
+overall_soundscape: ...
+non_diegetic_music: ...
+
+The integrated description must be chronological. Begin exactly with [Shot 1] (with no timestamp). Add later shots only for genuine cuts, formatted like [Shot 2] At 00:04.500, ...; never manufacture divisions. Ground subjects, appearance, clothing, environment, objects, actions, interactions, spatial relationships, meaningful lighting, confidently legible text, and observable camera behavior using ordinary terms such as close-up, medium shot, wide shot, tracking, pan, tilt, handheld, push-in, pull-out, or static. Preserve temporal order rather than making a still-image summary.
+
+Use stable speaker IDs such as (S1). Only when speech is confidently intelligible, preserve its exact words as <d>[English] exact spoken words</d>; never invent uncertain dialogue. Put singing and diegetic music in the integrated timeline when appropriate.
+
+overall_soundscape covers ambient/environmental, action/object, and nonverbal human/animal sounds without pointlessly repeating dialogue. Use N/A only when appropriate. non_diegetic_music covers only soundtrack/background music not made by an in-world source; describe instrumentation, character, rhythm, and dynamics when audible, and use N/A when absent. Never infer music from cinematic-looking visuals. Fuse supplied video and soundtrack as one temporally related clip."""
+
+H3_NATIVE_AV_USER_TEMPLATE = """Analyze the complete native video and its supplied soundtrack together. Produce the three-field MiniMax-H3 caption only."""
+
 TAG_TO_NATURAL_IMAGE_SYSTEM_PROMPT = (
     "You convert image tags and rough captions into polished dataset captions. Use the image as the source of truth for visible content. "
     "Use supplied captions, tags, and metadata only to clarify ambiguous visible details, named characters, series, artist/style labels, quality labels, or relationships. "
@@ -372,6 +385,20 @@ SOURCE_TAGS: {source_tags}
 Caption this image now. Output the JSON only."""
 
 CAPTION_PRESETS = [
+    {
+        "id": "h3_qwen3_omni_native_av",
+        "name": "MiniMax H3 T2VA - Qwen3 Omni Native AV",
+        "description": "Dense chronological H3 captions from complete video plus automatically extracted audio via local llama.cpp/libmtmd.",
+        "media": "video",
+        "system_prompt": H3_NATIVE_AV_SYSTEM_PROMPT,
+        "user_template": H3_NATIVE_AV_USER_TEMPLATE,
+        "prefill": "",
+        "model": "qwen3-omni-h3-caption",
+        "max_output_tokens": 4096,
+        "video_input_mode": "native_av",
+        "include_audio": True,
+        "max_concurrent": 1,
+    },
     {
         "id": "video_basic",
         "name": "Basic video caption",
