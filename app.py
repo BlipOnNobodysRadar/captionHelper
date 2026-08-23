@@ -18,6 +18,7 @@ import requests
 from werkzeug.exceptions import RequestEntityTooLarge
 from PIL import Image
 from presets import CAPTION_PRESETS, DEFAULT_IMAGE_SYSTEM_PROMPT, DEFAULT_VIDEO_SYSTEM_PROMPT
+from native_av import prepare_native_av
 
 # ------------------ Config ------------------
 def _env_first(*names, default=None):
@@ -228,6 +229,7 @@ def _coerce_preset_saved_settings(raw:dict)->dict:
         "model",
         "prefill",
         "sampling_type",
+        "video_input_mode",
         "filename_affix_text",
         "filename_affix_position",
         "output_subdir_name",
@@ -246,6 +248,7 @@ def _coerce_preset_saved_settings(raw:dict)->dict:
         "output_to_subdir",
         "use_existing_caption",
         "image_mode",
+        "include_audio",
     )
     int_fields = {
         "num_frames": (1, 32),
@@ -267,6 +270,8 @@ def _coerce_preset_saved_settings(raw:dict)->dict:
             settings[field] = _clamp_int(raw.get(field), default, minimum, maximum)
     if settings.get("sampling_type") not in (None, "", "uniform", "head"):
         settings["sampling_type"] = "uniform"
+    if settings.get("video_input_mode") not in (None, "", "sampled_frames", "native_av"):
+        settings["video_input_mode"] = "sampled_frames"
     if settings.get("filename_affix_position") not in (None, "", "prefix", "suffix"):
         settings["filename_affix_position"] = "prefix"
     return settings
@@ -1068,6 +1073,39 @@ def validate_ideogram4_json_caption(caption:str)->dict:
     return {"valid": not errors, "errors": errors, "data": data}
 
 
+def validate_h3_caption(caption:str)->dict:
+    """Lightweight format validation without rewriting the model's prose."""
+    fields = ["integrated_multimodal_description:", "overall_soundscape:", "non_diegetic_music:"]
+    positions = [(caption or "").find(field) for field in fields]
+    errors = []
+    if any(position < 0 for position in positions):
+        errors.append("Output must contain all three required H3 fields.")
+    elif positions != sorted(positions):
+        errors.append("H3 fields are not in the required order.")
+    elif not (caption or "").lstrip().startswith(fields[0]):
+        errors.append("Output must begin with integrated_multimodal_description: and contain no introduction.")
+    if not (caption or "").strip():
+        errors.append("Caption is blank.")
+    return {"valid": not errors, "errors": errors}
+
+
+def _call_native_av_content(content, system_prompt, model, prefill="", max_output_tokens=DEFAULT_MAX_OUTPUT_TOKENS):
+    messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": content}]
+    if prefill.strip():
+        messages.append({"role": "assistant", "content": prefill.strip()})
+    payload = {"model": model or DEFAULT_MODEL, "messages": messages, "temperature": 0.2}
+    if int(max_output_tokens or 0) > 0:
+        payload["max_tokens"] = int(max_output_tokens)
+    response = requests.post(f"{API_BASE_URL}/chat/completions", json=payload, timeout=300)
+    if not response.ok:
+        detail = _api_error_detail(response)
+        raise VisionAPIRequestError(response.status_code, f"{BACKEND_DISPLAY_NAME} HTTP {response.status_code}: {detail}", detail)
+    caption = _clean_model_caption_output(response.json()["choices"][0]["message"].get("content") or "")
+    if not caption:
+        raise VisionAPIRequestError(None, "Backend returned an empty caption; refusing to write blank .txt")
+    return caption
+
+
 def _caption_with_validation(imgs, system_prompt, model, prefill, media_kind, max_output_tokens, user_prompt, validate_json=False, few_shot_examples=None):
     caption = call_vision_api(imgs, system_prompt, model, prefill=prefill, media_kind=media_kind, max_output_tokens=max_output_tokens, user_prompt=user_prompt, few_shot_examples=few_shot_examples)
     validation = validate_ideogram4_json_caption(caption) if validate_json else {"valid": True, "errors": []}
@@ -1199,6 +1237,10 @@ def _prepare_chat_request(form, files):
     validate_ideogram_json = form.get("validate_ideogram_json", "false").lower() in ("1", "true", "yes", "on")
     few_shot_examples = _normalize_few_shot_examples(form.get("few_shot_examples", "[]"))
     media_kind = "image" if image_mode else "clip"
+    video_input_mode = form.get("video_input_mode", "sampled_frames")
+    if video_input_mode not in {"sampled_frames", "native_av"} or image_mode:
+        video_input_mode = "sampled_frames"
+    include_audio = form.get("include_audio", "true").lower() in ("1", "true", "yes", "on")
 
     tmpdir = "tmp_uploads"
     os.makedirs(tmpdir, exist_ok=True)
@@ -1223,11 +1265,12 @@ def _prepare_chat_request(form, files):
                 except Exception:
                     num_frames = 5
                 sampling = form.get("sampling_type", "uniform")
-                imgs = extract_frames(upload_path, num_frames, sampling, max_image_side=max_image_side)
+                if video_input_mode == "sampled_frames":
+                    imgs = extract_frames(upload_path, num_frames, sampling, max_image_side=max_image_side)
 
         if not imgs and not typed_message:
             raise RuntimeError("Attach a file or enter a chat message first.")
-        if f and not imgs:
+        if f and not imgs and video_input_mode != "native_av":
             raise RuntimeError("No visual inputs found for captioning")
 
         existing_for_prompt = existing_caption_text if use_existing else ""
@@ -1282,6 +1325,8 @@ def _prepare_chat_request(form, files):
             "model_management": model_management,
             "history": _safe_chat_history(form.get("chat_history", "[]")),
             "few_shot_examples": few_shot_examples,
+            "video_input_mode": video_input_mode,
+            "include_audio": include_audio,
         }
     except Exception:
         if upload_path:
@@ -1393,17 +1438,22 @@ def chat_caption():
     prepared = None
     try:
         prepared = _prepare_chat_request(request.form, request.files)
-        caption, caption_meta = _caption_with_validation(
-            prepared["imgs"],
-            prepared["system_prompt"],
-            prepared["model"],
-            prepared["prefill"],
-            prepared["media_kind"],
-            prepared["max_output_tokens"],
-            prepared["user_prompt"],
-            validate_json=prepared["validate_ideogram_json"],
-            few_shot_examples=prepared["few_shot_examples"],
-        )
+        if prepared["video_input_mode"] == "native_av":
+            with prepare_native_av(prepared["upload_path"], prepared["user_prompt"], prepared["include_audio"]) as (content, native_meta):
+                caption = _call_native_av_content(content, prepared["system_prompt"], prepared["model"], prepared["prefill"], prepared["max_output_tokens"])
+            caption_meta = {"validation": validate_h3_caption(caption), "retried": False, "native_av": native_meta}
+        else:
+            caption, caption_meta = _caption_with_validation(
+                prepared["imgs"],
+                prepared["system_prompt"],
+                prepared["model"],
+                prepared["prefill"],
+                prepared["media_kind"],
+                prepared["max_output_tokens"],
+                prepared["user_prompt"],
+                validate_json=prepared["validate_ideogram_json"],
+                few_shot_examples=prepared["few_shot_examples"],
+            )
         preprocess_summary = _region_preprocess_summary(prepared["region_payload"]) if prepared["enable_region_preprocess"] else {"enabled": False, "warnings": [], "skipped": False}
         public_caption_meta = {k: v for k, v in caption_meta.items() if k not in ("prompt_used", "initial_user_prompt")}
         return jsonify({
@@ -1412,6 +1462,7 @@ def chat_caption():
             "region_preprocess": prepared["region_payload"],
             "region_preprocess_summary": preprocess_summary,
             "model_management": prepared["model_management"],
+            "native_av": caption_meta.get("native_av"),
             **public_caption_meta,
         })
     except Exception as e:
@@ -1428,6 +1479,7 @@ def chat_caption():
 def chat_caption_stream():
     def generate():
         prepared = None
+        native_context = None
         final_text = []
         try:
             prepared = _prepare_chat_request(request.form, request.files)
@@ -1443,7 +1495,13 @@ def chat_caption_stream():
             messages = [{"role": "system", "content": prepared["system_prompt"]}]
             messages.extend(_few_shot_messages(prepared["few_shot_examples"]))
             messages.extend(prepared["history"])
-            messages.append({"role": "user", "content": _build_user_content(target_prompt, prepared["imgs"])})
+            if prepared["video_input_mode"] == "native_av":
+                native_context = prepare_native_av(prepared["upload_path"], target_prompt, prepared["include_audio"])
+                native_content, native_meta = native_context.__enter__()
+                messages.append({"role": "user", "content": native_content})
+                yield _json_sse("meta", {"frames_used": 0, "native_av": native_meta})
+            else:
+                messages.append({"role": "user", "content": _build_user_content(target_prompt, prepared["imgs"])})
             if prepared["prefill"].strip():
                 messages.append({"role": "assistant", "content": prepared["prefill"].strip()})
             for event_type, token in _stream_chat_completion(messages, prepared["model"], prepared["max_output_tokens"]):
@@ -1456,10 +1514,13 @@ def chat_caption_stream():
             if not caption:
                 yield _json_sse("error", {"error": "Backend returned an empty caption."})
             else:
-                yield _json_sse("done", {"caption": caption})
+                validation = validate_h3_caption(caption) if prepared["video_input_mode"] == "native_av" else {"valid": True, "errors": []}
+                yield _json_sse("done", {"caption": caption, "validation": validation})
         except Exception as exc:
             yield _json_sse("error", {"error": str(exc)})
         finally:
+            if native_context:
+                native_context.__exit__(None, None, None)
             if prepared and prepared.get("upload_path"):
                 try:
                     os.remove(prepared["upload_path"])
@@ -1739,6 +1800,8 @@ def _process_one_target(fn:str, params:dict):
     max_output_tokens = params.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS)
     enable_region_preprocess = bool(params.get("enable_region_preprocess", False))
     validate_ideogram_json = bool(params.get("validate_ideogram_json", False))
+    video_input_mode = params.get("video_input_mode", "sampled_frames") if not image_mode else "sampled_frames"
+    include_audio = bool(params.get("include_audio", True))
 
     media_kind = "image" if image_mode else "clip"
     in_path = os.path.join(folder, fn)
@@ -1754,6 +1817,10 @@ def _process_one_target(fn:str, params:dict):
 
     try:
         old_text = ""
+        # Native AV intentionally has no sampled image inputs. Keep a concrete
+        # empty collection so shared prompt/metadata code can safely use its
+        # count without relying on the sampled-frame branch to assign it.
+        imgs = []
         if use_existing:
             old_text = _read_grounding_text(in_path, out_txt, use_existing)
 
@@ -1761,10 +1828,10 @@ def _process_one_target(fn:str, params:dict):
         # and sent to the local vision API at once.
         if image_mode:
             imgs = [image_to_data_url(in_path, max_image_side=max_image_side)]
-        else:
+        elif video_input_mode == "sampled_frames":
             imgs = extract_frames(in_path, num_frames, sampling, max_image_side=max_image_side)
 
-        if not imgs:
+        if not imgs and video_input_mode != "native_av":
             raise RuntimeError("No visual inputs found for captioning")
 
         context = _context_from_request_values(metadata_values, old_text, image_mode=image_mode, input_count=len(imgs))
@@ -1794,7 +1861,13 @@ def _process_one_target(fn:str, params:dict):
                 model_management = {"unload_before_preprocess": unload_result, "reload_after_preprocess": reload_result}
             user_prompt = _augment_prompt_with_region_candidates(user_prompt, region_payload)
 
-        caption, caption_meta = _caption_with_validation(imgs, system_prompt_in, model, prefill, media_kind, max_output_tokens, user_prompt, validate_json=validate_ideogram_json, few_shot_examples=params.get("few_shot_examples"))
+        native_meta = None
+        if video_input_mode == "native_av":
+            with prepare_native_av(in_path, user_prompt, include_audio) as (content, native_meta):
+                caption = _call_native_av_content(content, system_prompt_in, model, prefill, max_output_tokens)
+            caption_meta = {"validation": validate_h3_caption(caption), "retried": False, "prompt_used": user_prompt}
+        else:
+            caption, caption_meta = _caption_with_validation(imgs, system_prompt_in, model, prefill, media_kind, max_output_tokens, user_prompt, validate_json=validate_ideogram_json, few_shot_examples=params.get("few_shot_examples"))
         validation = caption_meta.get("validation") or {}
         preprocess_summary = _region_preprocess_summary(region_payload) if enable_region_preprocess else {"enabled": False, "warnings": [], "skipped": False}
         prompt_version = "captionhelper-region-proposal-v1"
@@ -1824,8 +1897,12 @@ def _process_one_target(fn:str, params:dict):
             "llama_cpp_model_management": model_management,
             "region_candidates_used_in_prompt": region_candidates_used_in_prompt,
             "final_validation_result": validation,
+            "media_input_mode": video_input_mode if not image_mode else "image",
+            "native_av": native_meta,
             "validation_retried": bool(caption_meta.get("retried")),
         }
+        if native_meta:
+            metadata_payload.update(native_meta)
         metadata_payload.update(_review_training_metadata(
             raw_model_output=caption,
             source_caption_or_tags=source_caption_or_tags,
@@ -1838,14 +1915,14 @@ def _process_one_target(fn:str, params:dict):
             user_prompt=caption_meta.get("prompt_used") or user_prompt,
             prefill=prefill,
             media_kind=media_kind,
-            visual_input_count=len(imgs),
+            visual_input_count=len(imgs) if imgs else 1,
         ))
         nullable_review_fields = {"manual_fixed_output", "manual_reviewed_at"}
         metadata_payload = {k: v for k, v in metadata_payload.items() if v is not None or k in nullable_review_fields}
         meta_path = _metadata_path_for_caption(out_txt)
-        if validate_ideogram_json and not validation.get("valid"):
+        if (validate_ideogram_json or video_input_mode == "native_av") and not validation.get("valid"):
             _write_caption_metadata(meta_path, metadata_payload)
-            return {"file": fn, "ok": False, "error": "Caption failed Ideogram JSON validation after retry", "validation_errors": validation.get("errors", []), "metadata_out": os.path.relpath(meta_path, folder), "region_preprocess_summary": preprocess_summary, "model_management": model_management}
+            return {"file": fn, "ok": False, "error": "Caption failed output validation", "validation_errors": validation.get("errors", []), "metadata_out": os.path.relpath(meta_path, folder), "region_preprocess_summary": preprocess_summary, "model_management": model_management}
 
         if os.path.exists(out_txt) and prepend_existing:
             try:
@@ -2111,6 +2188,10 @@ def batch_start():
     region_load_models = bool(data.get("region_load_models", REGION_PREPROCESS_LOAD_MODELS))
     llama_cpp_unload_during_preprocess = bool(data.get("llama_cpp_unload_during_preprocess", LLAMA_CPP_UNLOAD_DURING_PREPROCESS))
     few_shot_examples = _normalize_few_shot_examples(data.get("few_shot_examples", []))
+    video_input_mode = data.get("video_input_mode", "sampled_frames")
+    if video_input_mode not in {"sampled_frames", "native_av"}:
+        video_input_mode = "sampled_frames"
+    include_audio = bool(data.get("include_audio", True))
 
     job_id = uuid.uuid4().hex
     params = {
@@ -2152,6 +2233,8 @@ def batch_start():
         "region_ocr_model_path": data.get("region_ocr_model_path") or REGION_PREPROCESS_OCR_MODEL_PATH,
         "llama_cpp_unload_during_preprocess": llama_cpp_unload_during_preprocess,
         "few_shot_examples": few_shot_examples,
+        "video_input_mode": video_input_mode,
+        "include_audio": include_audio,
     }
 
     with JOBS_LOCK:
