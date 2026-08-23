@@ -19,6 +19,8 @@ class UserPresetTests(unittest.TestCase):
                 "prefill": "{",
                 "num_frames": 8,
                 "sampling_type": "head",
+                "video_input_mode": "native_av",
+                "include_audio": True,
                 "max_image_side": 1536,
                 "max_output_tokens": 256,
                 "max_concurrent": 2,
@@ -46,6 +48,8 @@ class UserPresetTests(unittest.TestCase):
         self.assertEqual(preset["saved_settings"]["model"], "/models/vision-model.gguf")
         self.assertEqual(preset["saved_settings"]["num_frames"], 8)
         self.assertEqual(preset["saved_settings"]["sampling_type"], "head")
+        self.assertEqual(preset["saved_settings"]["video_input_mode"], "native_av")
+        self.assertTrue(preset["saved_settings"]["include_audio"])
         self.assertTrue(preset["saved_settings"]["overwrite"])
         self.assertTrue(preset["saved_settings"]["prepend_existing"])
         self.assertTrue(preset["saved_settings"]["output_to_subdir"])

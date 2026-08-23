@@ -67,6 +67,8 @@ function applyPreset(preset) {
   setFieldValue('targetFolder', savedSettings.target_folder ?? preset.target_folder);
   setFieldValue('numFrames', savedSettings.num_frames ?? preset.num_frames);
   setFieldValue('samplingType', savedSettings.sampling_type ?? preset.sampling_type);
+  setFieldValue('videoInputMode', savedSettings.video_input_mode ?? preset.video_input_mode ?? 'sampled_frames');
+  setFieldValue('includeAudio', savedSettings.include_audio ?? preset.include_audio ?? true);
   setFieldValue('maxImageSide', savedSettings.max_image_side ?? preset.max_image_side);
   setFieldValue('maxConcurrent', savedSettings.max_concurrent ?? preset.max_concurrent);
   setFieldValue('abortAfterServerErrors', savedSettings.abort_after_server_errors ?? preset.abort_after_server_errors);
@@ -414,7 +416,8 @@ function renderAttachmentPreview(file) {
 
   const meta = document.createElement('div');
   meta.className = 'attachment-meta';
-  meta.innerHTML = `<strong>${file.name}</strong><small>${selectedFileLooksLikeImage(file) ? 'Image ready for chat' : 'Video ready for frame sampling'}</small>`;
+  const nativeMode = document.getElementById('videoInputMode')?.value === 'native_av';
+  meta.innerHTML = `<strong>${file.name}</strong><small>${selectedFileLooksLikeImage(file) ? 'Image ready for chat' : nativeMode ? 'Video ready for native audiovisual captioning' : 'Video ready for frame sampling'}</small>`;
   attachmentPreview.append(media, meta);
 }
 
@@ -483,6 +486,8 @@ async function buildChatFormData(file, messageOverride = null, historyOverride =
   fd.append('system_prompt', document.getElementById('systemPrompt').value);
   fd.append('num_frames', document.getElementById('numFrames').value);
   fd.append('sampling_type', document.getElementById('samplingType').value);
+  fd.append('video_input_mode', document.getElementById('videoInputMode').value);
+  fd.append('include_audio', document.getElementById('includeAudio').checked);
   fd.append('model', document.getElementById('modelName').value);
   fd.append('prefill', document.getElementById('prefill').value);
   fd.append('max_image_side', document.getElementById('maxImageSide').value);
@@ -642,9 +647,10 @@ async function streamChatCaption(turn) {
     buffer = parseSseEvents(buffer, (event, payload) => {
       if (event === 'meta') {
         const framesInfo = (typeof payload.frames_used === 'number' && payload.frames_used > 0) ? ` [inputs: ${payload.frames_used}] ` : '';
+        const nativeInfo = payload.native_av ? `Native video input\n${payload.native_av.audio_supplied ? 'Audio extracted and supplied' : payload.native_av.audio_stream_found ? 'Audio unavailable; visual-only fallback' : 'No audio stream found'}` : '';
         const preprocessNotice = formatRegionPreprocessNotice(payload.region_preprocess_summary);
         const modelNotice = formatModelManagementNotice(payload.model_management);
-        notices = [preprocessNotice, modelNotice, framesInfo].filter(Boolean).join('\n');
+        notices = [nativeInfo, preprocessNotice, modelNotice, framesInfo].filter(Boolean).join('\n');
         renderAssistant();
       } else if (event === 'thinking') {
         thinkingText += payload.token || '';
@@ -659,6 +665,9 @@ async function streamChatCaption(turn) {
         assistantMsg.retryButton.hidden = false;
       } else if (event === 'done' && payload.caption) {
         assistantText = payload.caption;
+        if (payload.validation && !payload.validation.valid) {
+          notices += `${notices ? '\n' : ''}Format warning: ${(payload.validation.errors || []).join(' ')}`;
+        }
         renderAssistant();
         assistantMsg.retryButton.hidden = false;
       }
@@ -801,6 +810,8 @@ async function getBatchBody() {
     max_concurrent: Number(document.getElementById('maxConcurrent').value),
     abort_after_server_errors: Number(document.getElementById('abortAfterServerErrors').value),
     sampling_type: document.getElementById('samplingType').value,
+    video_input_mode: document.getElementById('videoInputMode').value,
+    include_audio: document.getElementById('includeAudio').checked,
     overwrite: document.getElementById('overwrite').checked,
     prepend_existing: document.getElementById('prependExisting').checked,
     filename_affix_text: document.getElementById('filenameAffixText').value,
