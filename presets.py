@@ -394,7 +394,9 @@ CAPTION_PRESETS = [
         "user_template": H3_NATIVE_AV_USER_TEMPLATE,
         "prefill": "",
         "model": "qwen3-omni-h3-caption",
-        "max_output_tokens": 4096,
+        # Omit the per-request cap and let llama-server's configured generation
+        # limit apply. This avoids a second, easy-to-misread cutoff for H3.
+        "max_output_tokens": 0,
         "video_input_mode": "native_av",
         "include_audio": True,
         "validate_h3_output": False,

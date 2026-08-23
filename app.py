@@ -1101,9 +1101,19 @@ def _call_native_av_content(content, system_prompt, model, prefill="", max_outpu
     if not response.ok:
         detail = _api_error_detail(response)
         raise VisionAPIRequestError(response.status_code, f"{BACKEND_DISPLAY_NAME} HTTP {response.status_code}: {detail}", detail)
-    caption = _clean_model_caption_output(response.json()["choices"][0]["message"].get("content") or "")
+    response_data = response.json()
+    choice = response_data["choices"][0]
+    caption = _clean_model_caption_output(choice["message"].get("content") or "")
     if not caption:
         raise VisionAPIRequestError(None, "Backend returned an empty caption; refusing to write blank .txt")
+    without_thinking = re.sub(r"<think>.*?</think>", "", caption, flags=re.I | re.S).strip()
+    if len(without_thinking) < 16:
+        app.logger.warning(
+            "Native AV backend returned almost no answer text (finish_reason=%s, usage=%s, output=%r). "
+            "This is a backend generation/chat-template issue, not H3 validation. For Qwen3-Omni, check "
+            "the llama.cpp reasoning flags/template and avoid conflicting reasoning-off settings.",
+            choice.get("finish_reason"), response_data.get("usage"), caption,
+        )
     return caption
 
 

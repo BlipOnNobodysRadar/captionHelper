@@ -14,6 +14,7 @@ def test_h3_preset_defaults():
     assert preset["include_audio"] is True
     assert preset["validate_h3_output"] is False
     assert preset["model"] == "qwen3-omni-h3-caption"
+    assert preset["max_output_tokens"] == 0
     assert preset["max_concurrent"] == 1
 
 
@@ -161,3 +162,30 @@ def test_native_h3_validation_is_off_by_default_and_does_not_retry(monkeypatch):
     assert metadata["validation"] == {"enabled": False, "valid": True, "errors": []}
     assert metadata["retried"] is False
     assert len(calls) == 1
+
+
+def test_native_request_omits_zero_token_cap_and_warns_for_thinking_only(monkeypatch, caplog):
+    posted = {}
+
+    class Response:
+        ok = True
+
+        @staticmethod
+        def json():
+            return {
+                "choices": [{"message": {"content": "<think>\n\n</think>"}, "finish_reason": "stop"}],
+                "usage": {"completion_tokens": 3},
+            }
+
+    def fake_post(_url, **kwargs):
+        posted.update(kwargs["json"])
+        return Response()
+
+    monkeypatch.setattr(app.requests, "post", fake_post)
+    with caplog.at_level("WARNING"):
+        caption = app._call_native_av_content([], "system", "model", max_output_tokens=0)
+
+    assert caption == "<think>\n\n</think>"
+    assert "max_tokens" not in posted
+    assert "backend generation/chat-template issue" in caplog.text
+    assert "completion_tokens': 3" in caplog.text
