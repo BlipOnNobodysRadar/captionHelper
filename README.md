@@ -8,7 +8,7 @@ It is meant for dataset prep: point it at a folder of images or clips, choose a 
 
 - Chat captioning for one uploaded image or video.
 - Batch captioning for a target folder.
-- Image mode for still images; video mode samples frames from clips.
+- Image mode for still images; video mode either samples frames or sends a complete native audiovisual clip.
 - Optional existing-caption grounding from matching `.txt` files.
 - Assistant response prefill.
 - Batch progress, cancel, active-file display, elapsed time, ETA, captions/minute, and per-item duration.
@@ -23,6 +23,13 @@ It is meant for dataset prep: point it at a folder of images or clips, choose a 
 - Python 3.10 or newer.
 - [uv](https://docs.astral.sh/uv/) for Python environment and dependency management.
 - `llama-server` from [llama.cpp](https://github.com/ggml-org/llama.cpp) running with a vision-capable model/projector, or another OpenAI-compatible vision backend such as LM Studio.
+- FFmpeg (`ffmpeg` and `ffprobe` on `PATH`) to automatically include sound in native audiovisual mode.
+
+## Native audiovisual captioning
+
+Choose **MiniMax H3 T2VA - Qwen3 Omni Native AV** in either chat or Batch processing. The browser selects native video input, enables audio, chooses the `qwen3-omni-h3-caption` alias, and uses one worker by default. MP4, WebM, MOV, AVI, MKV, and M4V inputs are supported. CaptionHelper sends the complete file as `input_video`, extracts a temporary mono 16 kHz PCM WAV as `input_audio`, and removes the WAV after success or failure. Videos without an audio stream continue as explicitly visual-only inputs.
+
+This mode is intended primarily for a recent local llama.cpp server because raw base64 media can make requests large. "Native" means CaptionHelper does not arbitrarily choose OpenCV frames: llama.cpp/libmtmd performs its own model-agnostic decoding. It is not bit-identical to Qwen's official Transformers preprocessing, which would use `process_mm_info(..., use_audio_in_video=True)` with Qwen's processor; that remains a possible future backend.
 
 The default backend is llama.cpp at:
 
