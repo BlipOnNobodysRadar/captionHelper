@@ -249,6 +249,7 @@ def _coerce_preset_saved_settings(raw:dict)->dict:
         "use_existing_caption",
         "image_mode",
         "include_audio",
+        "validate_h3_output",
     )
     int_fields = {
         "num_frames": (1, 32),
@@ -1119,16 +1120,23 @@ def _h3_format_correction_content(content:list, errors:list[str])->list:
     return corrected
 
 
-def _caption_native_with_validation(content, system_prompt, model, prefill, max_output_tokens):
-    """Caption native media and retry once when only the H3 envelope is malformed."""
+def _caption_native_with_validation(content, system_prompt, model, prefill, max_output_tokens, validate_output=False):
+    """Caption native media; optionally validate and retry the H3 envelope."""
     initial_caption = _call_native_av_content(content, system_prompt, model, prefill, max_output_tokens)
+    if not validate_output:
+        return initial_caption, {
+            "validation": {"enabled": False, "valid": True, "errors": []},
+            "retried": False,
+            "initial_model_output": None,
+        }
     validation = validate_h3_caption(initial_caption)
+    validation["enabled"] = True
     if validation["valid"]:
         return initial_caption, {"validation": validation, "retried": False, "initial_model_output": None}
     corrected_content = _h3_format_correction_content(content, validation["errors"])
     caption = _call_native_av_content(corrected_content, system_prompt, model, prefill, max_output_tokens)
     return caption, {
-        "validation": validate_h3_caption(caption),
+        "validation": {**validate_h3_caption(caption), "enabled": True},
         "retried": True,
         "initial_model_output": initial_caption,
         "initial_validation": validation,
@@ -1279,6 +1287,7 @@ def _prepare_chat_request(form, files):
     existing_caption_text = form.get("existing_caption", "")
     enable_region_preprocess = form.get("enable_region_preprocess", "false").lower() in ("1", "true", "yes", "on")
     validate_ideogram_json = form.get("validate_ideogram_json", "false").lower() in ("1", "true", "yes", "on")
+    validate_h3_output = form.get("validate_h3_output", "false").lower() in ("1", "true", "yes", "on")
     few_shot_examples = _normalize_few_shot_examples(form.get("few_shot_examples", "[]"))
     media_kind = "image" if image_mode else "clip"
     video_input_mode = form.get("video_input_mode", "sampled_frames")
@@ -1364,6 +1373,7 @@ def _prepare_chat_request(form, files):
             "max_output_tokens": max_output_tokens,
             "media_kind": media_kind,
             "validate_ideogram_json": validate_ideogram_json,
+            "validate_h3_output": validate_h3_output,
             "enable_region_preprocess": enable_region_preprocess,
             "region_payload": region_payload,
             "model_management": model_management,
@@ -1484,7 +1494,7 @@ def chat_caption():
         prepared = _prepare_chat_request(request.form, request.files)
         if prepared["video_input_mode"] == "native_av":
             with prepare_native_av(prepared["upload_path"], prepared["user_prompt"], prepared["include_audio"]) as (content, native_meta):
-                caption, caption_meta = _caption_native_with_validation(content, prepared["system_prompt"], prepared["model"], prepared["prefill"], prepared["max_output_tokens"])
+                caption, caption_meta = _caption_native_with_validation(content, prepared["system_prompt"], prepared["model"], prepared["prefill"], prepared["max_output_tokens"], prepared["validate_h3_output"])
             caption_meta["native_av"] = native_meta
             _log_h3_validation(prepared["original_name"] or "chat upload", caption, caption_meta)
         else:
@@ -1559,7 +1569,7 @@ def chat_caption_stream():
             if not caption:
                 yield _json_sse("error", {"error": "Backend returned an empty caption."})
             else:
-                validation = validate_h3_caption(caption) if prepared["video_input_mode"] == "native_av" else {"valid": True, "errors": []}
+                validation = validate_h3_caption(caption) if prepared["video_input_mode"] == "native_av" and prepared["validate_h3_output"] else {"enabled": False, "valid": True, "errors": []}
                 yield _json_sse("done", {"caption": caption, "validation": validation})
         except Exception as exc:
             yield _json_sse("error", {"error": str(exc)})
@@ -1845,6 +1855,7 @@ def _process_one_target(fn:str, params:dict):
     max_output_tokens = params.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS)
     enable_region_preprocess = bool(params.get("enable_region_preprocess", False))
     validate_ideogram_json = bool(params.get("validate_ideogram_json", False))
+    validate_h3_output = bool(params.get("validate_h3_output", False))
     video_input_mode = params.get("video_input_mode", "sampled_frames") if not image_mode else "sampled_frames"
     include_audio = bool(params.get("include_audio", True))
 
@@ -1915,7 +1926,7 @@ def _process_one_target(fn:str, params:dict):
                     in_path, native_meta.get("video_duration_sec"), native_meta.get("audio_stream_found"),
                     native_meta.get("audio_supplied"), native_meta.get("warnings", []),
                 )
-                caption, caption_meta = _caption_native_with_validation(content, system_prompt_in, model, prefill, max_output_tokens)
+                caption, caption_meta = _caption_native_with_validation(content, system_prompt_in, model, prefill, max_output_tokens, validate_h3_output)
             caption_meta["prompt_used"] = user_prompt
             _log_h3_validation(fn, caption, caption_meta)
         else:
@@ -1972,7 +1983,7 @@ def _process_one_target(fn:str, params:dict):
         nullable_review_fields = {"manual_fixed_output", "manual_reviewed_at"}
         metadata_payload = {k: v for k, v in metadata_payload.items() if v is not None or k in nullable_review_fields}
         meta_path = _metadata_path_for_caption(out_txt)
-        if (validate_ideogram_json or video_input_mode == "native_av") and not validation.get("valid"):
+        if (validate_ideogram_json or (video_input_mode == "native_av" and validate_h3_output)) and not validation.get("valid"):
             _write_caption_metadata(meta_path, metadata_payload)
             return {"file": fn, "ok": False, "error": "Caption failed output validation", "validation_errors": validation.get("errors", []), "metadata_out": os.path.relpath(meta_path, folder), "region_preprocess_summary": preprocess_summary, "model_management": model_management}
 
@@ -2236,6 +2247,7 @@ def batch_start():
     abort_after_server_errors = _clamp_int(data.get("abort_after_server_errors", API_ABORT_AFTER_SERVER_ERRORS), API_ABORT_AFTER_SERVER_ERRORS, 0, 999)
     enable_region_preprocess = bool(data.get("enable_region_preprocess", False))
     validate_ideogram_json = bool(data.get("validate_ideogram_json", False))
+    validate_h3_output = bool(data.get("validate_h3_output", False))
     region_auto_download = bool(data.get("region_auto_download", REGION_PREPROCESS_AUTO_DOWNLOAD))
     region_load_models = bool(data.get("region_load_models", REGION_PREPROCESS_LOAD_MODELS))
     llama_cpp_unload_during_preprocess = bool(data.get("llama_cpp_unload_during_preprocess", LLAMA_CPP_UNLOAD_DURING_PREPROCESS))
@@ -2269,6 +2281,7 @@ def batch_start():
         "abort_after_server_errors": abort_after_server_errors,
         "enable_region_preprocess": enable_region_preprocess,
         "validate_ideogram_json": validate_ideogram_json,
+        "validate_h3_output": validate_h3_output,
         "region_detector": data.get("region_detector", REGION_PREPROCESS_DETECTOR),
         "region_segmenter": data.get("region_segmenter", REGION_PREPROCESS_SEGMENTER),
         "region_ocr": data.get("region_ocr", REGION_PREPROCESS_OCR),

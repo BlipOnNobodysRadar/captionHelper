@@ -21,6 +21,7 @@ class UserPresetTests(unittest.TestCase):
                 "sampling_type": "head",
                 "video_input_mode": "native_av",
                 "include_audio": True,
+                "validate_h3_output": False,
                 "max_image_side": 1536,
                 "max_output_tokens": 256,
                 "max_concurrent": 2,
@@ -50,6 +51,7 @@ class UserPresetTests(unittest.TestCase):
         self.assertEqual(preset["saved_settings"]["sampling_type"], "head")
         self.assertEqual(preset["saved_settings"]["video_input_mode"], "native_av")
         self.assertTrue(preset["saved_settings"]["include_audio"])
+        self.assertFalse(preset["saved_settings"]["validate_h3_output"])
         self.assertTrue(preset["saved_settings"]["overwrite"])
         self.assertTrue(preset["saved_settings"]["prepend_existing"])
         self.assertTrue(preset["saved_settings"]["output_to_subdir"])

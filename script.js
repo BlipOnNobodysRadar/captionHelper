@@ -69,6 +69,7 @@ function applyPreset(preset) {
   setFieldValue('samplingType', savedSettings.sampling_type ?? preset.sampling_type);
   setFieldValue('videoInputMode', savedSettings.video_input_mode ?? preset.video_input_mode ?? 'sampled_frames');
   setFieldValue('includeAudio', savedSettings.include_audio ?? preset.include_audio ?? true);
+  setFieldValue('validateH3Output', savedSettings.validate_h3_output ?? preset.validate_h3_output ?? false);
   setFieldValue('maxImageSide', savedSettings.max_image_side ?? preset.max_image_side);
   setFieldValue('maxConcurrent', savedSettings.max_concurrent ?? preset.max_concurrent);
   setFieldValue('abortAfterServerErrors', savedSettings.abort_after_server_errors ?? preset.abort_after_server_errors);
@@ -494,6 +495,7 @@ async function buildChatFormData(file, messageOverride = null, historyOverride =
   fd.append('max_output_tokens', document.getElementById('maxOutputTokens').value);
   fd.append('enable_region_preprocess', document.getElementById('enableRegionPreprocess').checked);
   fd.append('validate_ideogram_json', document.getElementById('validateIdeogramJson').checked);
+  fd.append('validate_h3_output', document.getElementById('validateH3Output').checked);
   fd.append('region_detector', document.getElementById('regionDetector').value);
   fd.append('region_segmenter', document.getElementById('regionSegmenter').value);
   fd.append('region_ocr', document.getElementById('regionOcr').value);
@@ -792,6 +794,7 @@ async function getBatchBody() {
     max_output_tokens: Number(document.getElementById('maxOutputTokens').value),
     enable_region_preprocess: document.getElementById('enableRegionPreprocess').checked,
     validate_ideogram_json: document.getElementById('validateIdeogramJson').checked,
+    validate_h3_output: document.getElementById('validateH3Output').checked,
     region_detector: document.getElementById('regionDetector').value,
     region_segmenter: document.getElementById('regionSegmenter').value,
     region_ocr: document.getElementById('regionOcr').value,

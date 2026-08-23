@@ -29,6 +29,8 @@ It is meant for dataset prep: point it at a folder of images or clips, choose a 
 
 Choose **MiniMax H3 T2VA - Qwen3 Omni Native AV** in either chat or Batch processing. The browser selects native video input, enables audio, chooses the `qwen3-omni-h3-caption` alias, and uses one worker by default. MP4, WebM, MOV, AVI, MKV, and M4V inputs are supported. CaptionHelper sends the complete file as `input_video`, extracts a temporary mono 16 kHz PCM WAV as `input_audio`, and removes the WAV after success or failure. Videos without an audio stream continue as explicitly visual-only inputs.
 
+H3 three-field output validation is optional and off by default. With validation off, every non-empty backend caption is written even if it is truncated or does not use the requested envelope. Enable **Validate H3 three-field output** only when you want one format-correction retry followed by rejection of still-malformed output. A response containing only a reasoning block usually indicates that the backend's separate context, reasoning, or generation limits were exhausted; CaptionHelper's Max output tokens field is only the OpenAI-compatible request cap.
+
 This mode is intended primarily for a recent local llama.cpp server because raw base64 media can make requests large. "Native" means CaptionHelper does not arbitrarily choose OpenCV frames: llama.cpp/libmtmd performs its own model-agnostic decoding. It is not bit-identical to Qwen's official Transformers preprocessing, which would use `process_mm_info(..., use_audio_in_video=True)` with Qwen's processor; that remains a possible future backend.
 
 The default backend is llama.cpp at:

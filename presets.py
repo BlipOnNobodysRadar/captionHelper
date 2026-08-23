@@ -397,6 +397,7 @@ CAPTION_PRESETS = [
         "max_output_tokens": 4096,
         "video_input_mode": "native_av",
         "include_audio": True,
+        "validate_h3_output": False,
         "max_concurrent": 1,
     },
     {

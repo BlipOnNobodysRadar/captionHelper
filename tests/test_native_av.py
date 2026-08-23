@@ -12,6 +12,7 @@ def test_h3_preset_defaults():
     preset = next(item for item in CAPTION_PRESETS if item["id"] == "h3_qwen3_omni_native_av")
     assert preset["video_input_mode"] == "native_av"
     assert preset["include_audio"] is True
+    assert preset["validate_h3_output"] is False
     assert preset["model"] == "qwen3-omni-h3-caption"
     assert preset["max_concurrent"] == 1
 
@@ -75,10 +76,7 @@ def test_batch_native_av_does_not_sample_frames_and_writes_sidecar(tmp_path, mon
     monkeypatch.setattr(app, "extract_frames", lambda *_args, **_kwargs: pytest.fail("native AV sampled frames"))
     monkeypatch.setattr(
         app, "_call_native_av_content",
-        lambda *_args, **_kwargs: (
-            "integrated_multimodal_description: [Shot 1] A clip.\n"
-            "overall_soundscape: Quiet.\nnon_diegetic_music: N/A"
-        ),
+        lambda *_args, **_kwargs: "cut-off but non-empty caption",
     )
 
     result = app._process_one_target("clip.mp4", _video_batch_params(tmp_path, "native_av"))
@@ -86,6 +84,7 @@ def test_batch_native_av_does_not_sample_frames_and_writes_sidecar(tmp_path, mon
     assert result["ok"] is True
     assert result["out"] == "clip.txt"
     assert (tmp_path / "clip.txt").is_file()
+    assert (tmp_path / "clip.txt").read_text() == "cut-off but non-empty caption"
 
 
 def test_batch_sampled_video_still_extracts_frames(tmp_path, monkeypatch):
@@ -121,7 +120,7 @@ def test_native_h3_retries_once_with_same_media_when_format_is_malformed(monkeyp
     monkeypatch.setattr(app, "_call_native_av_content", fake_call)
     media = {"type": "input_video", "input_video": {"data": "encoded-once"}}
     caption, metadata = app._caption_native_with_validation(
-        [media, {"type": "text", "text": "original prompt"}], "system", "model", "", 256,
+        [media, {"type": "text", "text": "original prompt"}], "system", "model", "", 256, True,
     )
 
     assert metadata["retried"] is True
@@ -137,9 +136,28 @@ def test_native_h3_retry_failure_remains_flagged(monkeypatch):
 
     caption, metadata = app._caption_native_with_validation(
         [{"type": "input_video", "input_video": {"data": "encoded"}}],
-        "system", "model", "", 256,
+        "system", "model", "", 256, True,
     )
 
     assert caption == "malformed"
     assert metadata["retried"] is True
     assert metadata["validation"]["valid"] is False
+
+
+def test_native_h3_validation_is_off_by_default_and_does_not_retry(monkeypatch):
+    calls = []
+
+    def fake_call(*_args):
+        calls.append(True)
+        return "cut-off but non-empty caption"
+
+    monkeypatch.setattr(app, "_call_native_av_content", fake_call)
+    caption, metadata = app._caption_native_with_validation(
+        [{"type": "input_video", "input_video": {"data": "encoded"}}],
+        "system", "model", "", 256,
+    )
+
+    assert caption == "cut-off but non-empty caption"
+    assert metadata["validation"] == {"enabled": False, "valid": True, "errors": []}
+    assert metadata["retried"] is False
+    assert len(calls) == 1
