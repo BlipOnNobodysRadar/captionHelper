@@ -1,8 +1,10 @@
 import os
+from contextlib import contextmanager
 
 import pytest
 
 import native_av
+import app
 from presets import CAPTION_PRESETS
 
 
@@ -41,3 +43,64 @@ def test_audio_cleanup_after_context_failure(tmp_path, monkeypatch):
             assert any(part["type"] == "input_audio" for part in content)
             raise RuntimeError("backend failed")
     assert not os.path.exists(audio)
+
+
+def _video_batch_params(folder, mode):
+    return {
+        "target_folder": str(folder), "image_mode": False,
+        "system_prompt": "system", "user_template": "Caption this clip.",
+        "metadata_values": {}, "model": "model", "prefill": "",
+        "num_frames": 3, "sampling_type": "uniform", "overwrite": True,
+        "prepend_existing": False, "use_existing_caption": False,
+        "filename_affix_text": "", "filename_affix_position": "prefix",
+        "output_to_subdir": False, "output_subdir_name": "",
+        "max_image_side": 0, "max_output_tokens": 256,
+        "video_input_mode": mode, "include_audio": True,
+    }
+
+
+def test_batch_native_av_does_not_sample_frames_and_writes_sidecar(tmp_path, monkeypatch):
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"video")
+
+    @contextmanager
+    def fake_prepare(path, text, include_audio):
+        assert path == str(video)
+        assert include_audio is True
+        yield [{"type": "input_video", "input_video": {"data": "encoded"}}], {
+            "media_input_mode": "native_av", "audio_supplied": True,
+        }
+
+    monkeypatch.setattr(app, "prepare_native_av", fake_prepare)
+    monkeypatch.setattr(app, "extract_frames", lambda *_args, **_kwargs: pytest.fail("native AV sampled frames"))
+    monkeypatch.setattr(
+        app, "_call_native_av_content",
+        lambda *_args, **_kwargs: (
+            "integrated_multimodal_description: [Shot 1] A clip.\n"
+            "overall_soundscape: Quiet.\nnon_diegetic_music: N/A"
+        ),
+    )
+
+    result = app._process_one_target("clip.mp4", _video_batch_params(tmp_path, "native_av"))
+
+    assert result["ok"] is True
+    assert result["out"] == "clip.txt"
+    assert (tmp_path / "clip.txt").is_file()
+
+
+def test_batch_sampled_video_still_extracts_frames(tmp_path, monkeypatch):
+    video = tmp_path / "clip.webm"
+    video.write_bytes(b"video")
+    sampled = []
+
+    def fake_extract(*args, **kwargs):
+        sampled.append((args, kwargs))
+        return ["data:image/jpeg;base64,frame"]
+
+    monkeypatch.setattr(app, "extract_frames", fake_extract)
+    monkeypatch.setattr(app, "call_vision_api", lambda *_args, **_kwargs: "sampled caption")
+
+    result = app._process_one_target("clip.webm", _video_batch_params(tmp_path, "sampled_frames"))
+
+    assert result["ok"] is True
+    assert len(sampled) == 1

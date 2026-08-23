@@ -1817,6 +1817,10 @@ def _process_one_target(fn:str, params:dict):
 
     try:
         old_text = ""
+        # Native AV intentionally has no sampled image inputs. Keep a concrete
+        # empty collection so shared prompt/metadata code can safely use its
+        # count without relying on the sampled-frame branch to assign it.
+        imgs = []
         if use_existing:
             old_text = _read_grounding_text(in_path, out_txt, use_existing)
 
