@@ -877,11 +877,23 @@ async function pollProgress() {
           if (notice) logBatch(notice);
           const modelNotice = formatModelManagementNotice(r.model_management);
           if (modelNotice) logBatch(modelNotice);
+          if (r.native_av) {
+            const sha = String(r.native_av.video_sha256 || '').slice(0, 12) || 'unknown';
+            const bytes = Number(r.native_av.video_size_bytes || 0);
+            const duration = Number(r.native_av.video_duration_sec || 0);
+            const audio = r.native_av.audio_supplied ? 'audio supplied' : r.native_av.audio_stream_found ? 'audio unavailable' : 'visual only';
+            logBatch(`  Native AV · sha256 ${sha} · ${bytes.toLocaleString()} bytes · ${duration.toFixed(2)}s · ${audio}`);
+          }
         }
         else if (r.skipped) logBatch(`↷ ${r.file} (skipped: ${r.reason})${took}`);
         else {
           const code = r.status_code ? ` [HTTP ${r.status_code}]` : '';
           logBatch(`✗ ${r.file}${code}: ${r.error}${took}`);
+          if (r.native_av) {
+            const sha = String(r.native_av.video_sha256 || '').slice(0, 12) || 'unknown';
+            const audio = r.native_av.audio_supplied ? 'audio supplied' : r.native_av.audio_stream_found ? 'audio unavailable' : 'visual only';
+            logBatch(`  Native AV · sha256 ${sha} · ${audio}`);
+          }
           const notice = formatRegionPreprocessNotice(r.region_preprocess_summary);
           if (notice) logBatch(notice);
           const modelNotice = formatModelManagementNotice(r.model_management);

@@ -76,7 +76,7 @@ def _video_batch_params(folder, mode):
     }
 
 
-def test_batch_native_av_does_not_sample_frames_and_writes_sidecar(tmp_path, monkeypatch):
+def test_batch_native_av_does_not_sample_frames_and_writes_sidecar(tmp_path, monkeypatch, caplog):
     video = tmp_path / "clip.mp4"
     video.write_bytes(b"video")
 
@@ -86,6 +86,8 @@ def test_batch_native_av_does_not_sample_frames_and_writes_sidecar(tmp_path, mon
         assert include_audio is True
         yield [{"type": "input_video", "input_video": {"data": "encoded"}}], {
             "media_input_mode": "native_av", "audio_supplied": True,
+            "video_sha256": "abc123def456", "video_size_bytes": 5,
+            "video_duration_sec": 1.25, "audio_stream_found": True, "warnings": [],
         }
 
     monkeypatch.setattr(app, "prepare_native_av", fake_prepare)
@@ -95,12 +97,16 @@ def test_batch_native_av_does_not_sample_frames_and_writes_sidecar(tmp_path, mon
         lambda *_args, **_kwargs: "cut-off but non-empty caption",
     )
 
-    result = app._process_one_target("clip.mp4", _video_batch_params(tmp_path, "native_av"))
+    with caplog.at_level("INFO", logger=app.app.logger.name):
+        result = app._process_one_target("clip.mp4", _video_batch_params(tmp_path, "native_av"))
 
     assert result["ok"] is True
     assert result["out"] == "clip.txt"
     assert (tmp_path / "clip.txt").is_file()
     assert (tmp_path / "clip.txt").read_text() == "cut-off but non-empty caption"
+    assert result["native_av"]["video_sha256"] == "abc123def456"
+    assert "Native audiovisual input ready" in caplog.text
+    assert "abc123def456" in caplog.text
 
 
 def test_batch_sampled_video_still_extracts_frames(tmp_path, monkeypatch):

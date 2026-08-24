@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import hashlib
 import sys
+import logging
 from flask import Flask, Response, abort, jsonify, render_template, request, send_from_directory, stream_with_context
 import requests
 from werkzeug.exceptions import RequestEntityTooLarge
@@ -135,6 +136,10 @@ DEFAULT_PROMPT_IMAGE = DEFAULT_IMAGE_SYSTEM_PROMPT
 # project root would leak source files and local user_presets.json contents.
 app = Flask(__name__, template_folder=".", static_folder=None)
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
+# Flask inherits the root logger's WARNING level when debug mode is off. Native
+# preparation diagnostics are intentionally INFO, so opt the application logger
+# in without making third-party libraries equally noisy.
+app.logger.setLevel(logging.INFO)
 
 _ALLOWED_STATIC_FILES = {"script.js", "style.css"}
 
@@ -1862,6 +1867,17 @@ def _target_would_skip(in_path:str, params:dict)->bool:
     return os.path.exists(out_txt) and (not params.get("overwrite")) and (not params.get("prepend_existing"))
 
 
+def _set_batch_active_detail(params:dict, filename:str, message:str, **details)->None:
+    job_id = params.get("job_id")
+    if not job_id:
+        return
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return
+        job.setdefault("active_details", {})[filename] = {"message": message, **details}
+
+
 def _process_one_target(fn:str, params:dict):
     folder = params["target_folder"]
     image_mode = params["image_mode"]
@@ -1889,6 +1905,7 @@ def _process_one_target(fn:str, params:dict):
     source_txt = source_base + ".txt"
     output_paths = _build_output_paths(in_path, params)
     out_txt = output_paths["caption"]
+    native_meta = None
 
     # Skip logic. Existing caption grounding implies we usually want to overwrite/prepend,
     # otherwise the safest behavior is still to leave existing caption files alone.
@@ -1941,10 +1958,16 @@ def _process_one_target(fn:str, params:dict):
                 model_management = {"unload_before_preprocess": unload_result, "reload_after_preprocess": reload_result}
             user_prompt = _augment_prompt_with_region_candidates(user_prompt, region_payload)
 
-        native_meta = None
         if video_input_mode == "native_av":
+            _set_batch_active_detail(params, fn, "Preparing native video and audio")
             app.logger.info("Preparing native audiovisual batch input: %s (audio requested=%s)", in_path, include_audio)
             with prepare_native_av(in_path, user_prompt, include_audio) as (content, native_meta):
+                short_sha = str(native_meta.get("video_sha256") or "")[:12]
+                audio_status = "audio supplied" if native_meta.get("audio_supplied") else "visual only"
+                _set_batch_active_detail(
+                    params, fn, f"Native AV ready · {short_sha} · {audio_status}",
+                    native_av=native_meta,
+                )
                 app.logger.info(
                     "Native audiovisual input ready: %s (sha256=%s, bytes=%s, duration=%s, audio stream=%s, audio supplied=%s, warnings=%s)",
                     in_path, native_meta.get("video_sha256"), native_meta.get("video_size_bytes"), native_meta.get("video_duration_sec"), native_meta.get("audio_stream_found"),
@@ -2033,9 +2056,12 @@ def _process_one_target(fn:str, params:dict):
             "metadata_out": os.path.relpath(meta_path, folder),
             "region_preprocess_summary": preprocess_summary,
             "model_management": model_management,
+            "native_av": native_meta,
         }
     except VisionAPIRequestError as e:
         out = {"file": fn, "ok": False, "error": str(e), "server_error": True}
+        if native_meta:
+            out["native_av"] = native_meta
         debug_path = _write_caption_error_debug_file(output_paths, e)
         if debug_path:
             out["debug_out"] = os.path.relpath(debug_path, folder)
