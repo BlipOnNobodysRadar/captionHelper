@@ -8,7 +8,7 @@ It is meant for dataset prep: point it at a folder of images or clips, choose a 
 
 - Chat captioning for one uploaded image or video.
 - Batch captioning for a target folder.
-- Image mode for still images; video mode samples frames from clips.
+- Image mode for still images; video mode either samples frames or sends a complete native audiovisual clip.
 - Optional existing-caption grounding from matching `.txt` files.
 - Assistant response prefill.
 - Batch progress, cancel, active-file display, elapsed time, ETA, captions/minute, and per-item duration.
@@ -23,6 +23,23 @@ It is meant for dataset prep: point it at a folder of images or clips, choose a 
 - Python 3.10 or newer.
 - [uv](https://docs.astral.sh/uv/) for Python environment and dependency management.
 - `llama-server` from [llama.cpp](https://github.com/ggml-org/llama.cpp) running with a vision-capable model/projector, or another OpenAI-compatible vision backend such as LM Studio.
+- FFmpeg (`ffmpeg` and `ffprobe` on `PATH`) to automatically include sound in native audiovisual mode.
+
+## Native audiovisual captioning
+
+Choose **MiniMax H3 T2VA - Qwen3 Omni Native AV** in either chat or Batch processing. The browser selects native video input, enables audio, chooses the `qwen3-omni-h3-caption` alias, and uses one worker by default. MP4, WebM, MOV, AVI, MKV, and M4V inputs are supported. CaptionHelper sends the complete file as `input_video`, extracts a temporary mono 16 kHz PCM WAV as `input_audio`, and removes the WAV after success or failure. Videos without an audio stream continue as explicitly visual-only inputs.
+
+H3 three-field output validation is optional and off by default. With validation off, every non-empty backend caption is written even if it is truncated or does not use the requested envelope. Enable **Validate H3 three-field output** only when you want one format-correction retry followed by rejection of still-malformed output. The built-in preset leaves **Max output tokens** at `0`, so CaptionHelper omits `max_tokens` and llama-server's own generation limit applies.
+
+A response containing only `<think>\n\n</think>` (occasionally followed by a tiny fragment) is not a CaptionHelper validation cutoff. It means llama-server generated only the reasoning wrapper and then stopped; its timing log will likewise show only about three evaluated output tokens. Check the Qwen3-Omni chat template and reasoning configuration first. In particular, avoid stacking conflicting `--reasoning off`, `--reasoning-budget 0`, and `--reasoning-format none` behavior without verifying that combination against the exact llama.cpp build/model template. CaptionHelper logs `finish_reason`, token usage, and the short raw output when it detects this condition. Very low `--image-min-tokens`/`--image-max-tokens` settings can also severely reduce visual grounding; heed llama.cpp's model-specific minimum-token warning.
+
+Native AV requests explicitly set llama.cpp's `cache_prompt` to `false`. Although current llama.cpp identifies media chunks by a SHA-256-derived ID, disabling the default prefix cache is a conservative safeguard against stale multimodal state or backend-version cache bugs when a batch changes clips. Expect each clip's prompt and media to be evaluated afresh.
+
+This cache isolation applies to both batch/non-streaming calls and streaming chat. Native preparation records and logs each source video's byte size and SHA-256 digest, making it possible to confirm that consecutive jobs sent different files without logging the large base64 payload. The prompt also explicitly says that the request contains exactly one clip. In chat, existing textual history is still retained for multi-turn behavior; use **New chat** when switching to an unrelated clip if you do not want earlier conversation text to influence the answer.
+
+Current llama.cpp/libmtmd decodes native video at a hardcoded default target of 4 fps and injects timestamp text every 5 seconds; the OpenAI-compatible `input_video` object does not currently expose those decoder settings. CaptionHelper's **Number of frames** and **Frame Sampling Type** controls apply only to sampled-frame mode and cannot change native mode's libmtmd rate. If the model expects Qwen's official 2 fps preprocessing, native llama.cpp timing and temporal quality can differ; exact official preprocessing still requires the Qwen processor path described below.
+
+This mode is intended primarily for a recent local llama.cpp server because raw base64 media can make requests large. "Native" means CaptionHelper does not arbitrarily choose OpenCV frames: llama.cpp/libmtmd performs its own model-agnostic decoding. It is not bit-identical to Qwen's official Transformers preprocessing, which would use `process_mm_info(..., use_audio_in_video=True)` with Qwen's processor; that remains a possible future backend.
 
 The default backend is llama.cpp at:
 

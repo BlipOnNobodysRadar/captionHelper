@@ -100,6 +100,21 @@
         </div>
 
         <div class="row">
+          <label>Video input:</label>
+          <select id="videoInputMode">
+            <option value="sampled_frames" selected>Sampled frames</option>
+            <option value="native_av">Native video + audio</option>
+          </select>
+          <small style="color:#8a90a6">Native mode sends the complete file to a recent local llama.cpp backend instead of sampling frames.</small>
+          <small style="color:#8a90a6">Frame count/sampling controls do not affect native mode; current llama.cpp/libmtmd chooses its own 4 fps decode rate.</small>
+        </div>
+
+        <div class="row">
+          <label><input type="checkbox" id="includeAudio" checked> Include video audio</label>
+          <small style="color:#8a90a6">Native mode automatically extracts temporary mono 16 kHz WAV audio and removes it after the request.</small>
+        </div>
+
+        <div class="row">
           <label>Frame Sampling Type:</label>
           <select id="samplingType">
             <option value="uniform" selected>uniform</option>
@@ -128,6 +143,10 @@
           <div class="row">
             <label><input type="checkbox" id="validateIdeogramJson"> Validate Ideogram 4 JSON</label>
             <small style="color:#8a90a6">Only runs when checked. Retries once with validator errors.</small>
+          </div>
+          <div class="row">
+            <label><input type="checkbox" id="validateH3Output"> Validate H3 three-field output</label>
+            <small style="color:#8a90a6">Off by default. When enabled, malformed native AV captions are retried once and rejected if still malformed.</small>
           </div>
           <div class="row">
             <label><input type="checkbox" id="regionAutoDownload" checked> Auto-download missing preprocessing models</label>
