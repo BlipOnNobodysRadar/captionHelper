@@ -1094,7 +1094,15 @@ def _call_native_av_content(content, system_prompt, model, prefill="", max_outpu
     messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": content}]
     if prefill.strip():
         messages.append({"role": "assistant", "content": prefill.strip()})
-    payload = {"model": model or DEFAULT_MODEL, "messages": messages, "temperature": 0.2}
+    payload = {
+        "model": model or DEFAULT_MODEL,
+        "messages": messages,
+        "temperature": 0.2,
+        # Correctness is more important than prefix-cache speed for changing
+        # multimodal inputs. This also works around backend builds that reuse a
+        # previous clip's cached media state despite a different media hash.
+        "cache_prompt": False,
+    }
     if int(max_output_tokens or 0) > 0:
         payload["max_tokens"] = int(max_output_tokens)
     response = requests.post(f"{API_BASE_URL}/chat/completions", json=payload, timeout=300)

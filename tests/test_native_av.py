@@ -187,5 +187,6 @@ def test_native_request_omits_zero_token_cap_and_warns_for_thinking_only(monkeyp
 
     assert caption == "<think>\n\n</think>"
     assert "max_tokens" not in posted
+    assert posted["cache_prompt"] is False
     assert "backend generation/chat-template issue" in caplog.text
     assert "completion_tokens': 3" in caplog.text
